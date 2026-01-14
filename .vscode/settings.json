@@ -1,8 +1,23 @@
 {
     "cSpell.words": [
+        "ADOT",
         "authtype",
+        "AWSX",
+        "contrib",
+        "GOARCH",
+        "golangci",
+        "GOOS",
+        "gopter",
+        "jarrodlowe",
         "JMAP",
+        "otellambda",
+        "otlptrace",
+        "otlptracegrpc",
         "RCPT",
+        "semconv",
+        "tfstate",
+        "tfvars",
+        "tracecontext",
         "userpool"
     ]
 }

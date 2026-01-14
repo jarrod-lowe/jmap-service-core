@@ -63,6 +63,85 @@ IAM policy (conceptual) should be least-privilege:
 
 (You can keep it to these two Lambdas in the MVP.)
 
+## Infrastructure Implementation Status
+
+### ✅ Completed (Phase 1 - Pipeline Validation)
+
+**Build Pipeline:**
+
+* Go module setup with AWS SDK v2 + Powertools v2
+* Makefile-driven build system for linux/arm64 Lambda compilation
+* Per-lambda build directories (build/{lambda-name}/)
+* Automated zipping and packaging
+
+**Lambda Functions:**
+
+* `hello-world` - Dummy Lambda demonstrating observability patterns
+  * Location: `cmd/hello-world/main.go`
+  * Structured JSON logging via AWS Lambda Powertools for Go v2
+  * X-Ray tracing with custom subsegments and annotations
+  * CloudWatch custom metrics
+  * Returns: `{"status":"ok","message":"Hello from JMAP service"}`
+
+**Infrastructure (Terraform):**
+
+* Module organization: `terraform/modules/jmap-service/`
+* Multi-environment: test and prod configurations
+* S3 state backend with auto-provisioning
+* IAM roles with least-privilege policies (logs, X-Ray, metrics only)
+* CloudWatch log groups with retention policies (7d test, 30d prod)
+* CloudWatch metric filters and alarms for errors
+* Lambda Function URLs for testing (NONE authorization)
+
+**Observability:**
+
+* CloudWatch Logs with structured JSON format
+* X-Ray active tracing with custom subsegments
+* CloudWatch custom metrics (RequestCount in JMAPService namespace)
+* Error monitoring and alarms
+
+### 🚧 Not Yet Implemented
+
+**API Layer:**
+
+* API Gateway with REST API
+* Cognito User Pool and authorizer
+* IAM authorizer for machine access
+* Request validation
+* CORS configuration
+
+**Data Storage:**
+
+* DynamoDB single-table design
+* S3 bucket for email blobs
+* GSI for email queries
+
+**JMAP Functions:**
+
+* GetJmapSessionFunction (`GET /.well-known/jmap`)
+* JmapApiFunction (`POST /jmap` and `POST /jmap-iam/{accountId}`)
+
+**JMAP Methods:**
+
+* Email/import (with Message-ID deduplication)
+* Email/query (with filtering and pagination)
+* Email/get (with property selection)
+
+**Deployment Commands:**
+
+```bash
+# Build and deploy to test environment
+make build ENV=test
+make package ENV=test
+make init ENV=test
+make plan ENV=test
+make apply ENV=test
+
+# Test the deployment
+make outputs ENV=test  # Get Function URL
+curl -X POST <function-url>  # Should return {"status":"ok","message":"Hello from JMAP service"}
+```
+
 ## Storage model (minimal but workable)
 
 ### S3
