@@ -46,3 +46,8 @@ variable "lambda_timeout" {
     error_message = "Lambda timeout must be between 1 and 900 seconds"
   }
 }
+
+variable "domain_name" {
+  description = "FQDN for the API (e.g., api.example.com)"
+  type        = string
+}

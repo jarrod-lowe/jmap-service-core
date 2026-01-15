@@ -1,0 +1,29 @@
+openapi: "3.0.1"
+info:
+  title: "JMAP Service API"
+  version: "1.0.0"
+paths:
+  /health:
+    get:
+      summary: "Health check"
+      operationId: "getHealth"
+      responses:
+        "200":
+          description: "Service is healthy"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+      x-amazon-apigateway-integration:
+        type: mock
+        requestTemplates:
+          application/json: '{"statusCode": 200}'
+        responses:
+          default:
+            statusCode: "200"
+            responseTemplates:
+              application/json: '{"status": "ok"}'

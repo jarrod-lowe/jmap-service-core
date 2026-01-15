@@ -31,3 +31,8 @@ variable "lambda_timeout" {
   type        = number
   default     = 30
 }
+
+variable "domain_name" {
+  description = "FQDN for the API (e.g., api.example.com)"
+  type        = string
+}

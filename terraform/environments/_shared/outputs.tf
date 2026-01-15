@@ -22,3 +22,47 @@ output "hello_world_role_arn" {
   description = "IAM role ARN for hello-world Lambda"
   value       = module.jmap_service.hello_world_role_arn
 }
+
+# API Gateway outputs
+output "api_gateway_id" {
+  description = "ID of the REST API Gateway"
+  value       = module.jmap_service.api_gateway_id
+}
+
+output "api_gateway_invoke_url" {
+  description = "Invoke URL for API Gateway stage"
+  value       = module.jmap_service.api_gateway_invoke_url
+}
+
+# CloudFront outputs
+output "cloudfront_distribution_id" {
+  description = "ID of the CloudFront distribution"
+  value       = module.jmap_service.cloudfront_distribution_id
+}
+
+output "cloudfront_domain_name" {
+  description = "CloudFront domain name for A/ALIAS record"
+  value       = module.jmap_service.cloudfront_domain_name
+}
+
+output "cloudfront_hosted_zone_id" {
+  description = "CloudFront hosted zone ID for ALIAS record"
+  value       = module.jmap_service.cloudfront_hosted_zone_id
+}
+
+# ACM certificate outputs for DNS validation
+output "acm_certificate_arn" {
+  description = "ARN of the ACM certificate"
+  value       = module.jmap_service.acm_certificate_arn
+}
+
+output "acm_validation_records" {
+  description = "DNS CNAME records required for ACM certificate validation"
+  value       = module.jmap_service.acm_validation_records
+}
+
+# Convenience output
+output "api_endpoint" {
+  description = "Full API endpoint URL via custom domain"
+  value       = module.jmap_service.api_endpoint
+}
