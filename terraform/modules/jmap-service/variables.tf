@@ -51,3 +51,15 @@ variable "domain_name" {
   description = "FQDN for the API (e.g., api.example.com)"
   type        = string
 }
+
+variable "oauth_callback_urls" {
+  description = "OAuth callback URLs for apps and websites"
+  type        = list(string)
+  default     = ["http://localhost:3000/callback"]
+}
+
+variable "oauth_logout_urls" {
+  description = "OAuth logout redirect URLs"
+  type        = list(string)
+  default     = ["http://localhost:3000/logout"]
+}

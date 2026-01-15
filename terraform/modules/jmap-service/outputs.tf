@@ -72,3 +72,46 @@ output "api_endpoint" {
   description = "Full API endpoint URL via custom domain"
   value       = "https://${var.domain_name}/health"
 }
+
+# Cognito outputs
+output "cognito_user_pool_id" {
+  description = "ID of the Cognito User Pool"
+  value       = aws_cognito_user_pool.main.id
+}
+
+output "cognito_user_pool_arn" {
+  description = "ARN of the Cognito User Pool"
+  value       = aws_cognito_user_pool.main.arn
+}
+
+output "cognito_client_id" {
+  description = "ID of the Cognito App Client"
+  value       = aws_cognito_user_pool_client.jmap_client.id
+}
+
+output "cognito_domain" {
+  description = "Cognito User Pool domain for OAuth"
+  value       = aws_cognito_user_pool_domain.main.domain
+}
+
+output "cognito_oauth_endpoint" {
+  description = "OAuth 2.0 authorization endpoint"
+  value       = "https://${aws_cognito_user_pool_domain.main.domain}.auth.${var.aws_region}.amazoncognito.com"
+}
+
+# get-jmap-session Lambda outputs
+output "get_jmap_session_function_name" {
+  description = "Name of the get-jmap-session Lambda function"
+  value       = aws_lambda_function.get_jmap_session.function_name
+}
+
+output "get_jmap_session_function_arn" {
+  description = "ARN of the get-jmap-session Lambda function"
+  value       = aws_lambda_function.get_jmap_session.arn
+}
+
+# JMAP session endpoint
+output "jmap_session_endpoint" {
+  description = "JMAP session discovery endpoint"
+  value       = "https://${var.domain_name}/.well-known/jmap"
+}

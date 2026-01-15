@@ -9,6 +9,8 @@ This is a **JMAP (JSON Meta Application Protocol) email server** implementation 
 - **User authentication**: Cognito JWT for client applications
 - **Machine authentication**: AWS IAM SigV4 for automated email ingestion pipelines
 
+The test user credentials are in test-user.yaml, if it exists.
+
 ## Build and Development Commands
 
 We will use a Makefile for presenting all the operations to the use (such as plans, cleans, applies, etc). Terraform will be used for infrastructure. See `../ses-mail` for an example of a project using those.
@@ -85,11 +87,11 @@ Returns `unknownMethod` error while processing other calls in same request
 - Co-located with source files using `_test.go` suffix
 - Covers specific scenarios, edge cases, error conditions
 - Integration tests for end-to-end JMAP request/response flows
-- Use the TDD superpower for all go code
+- Use the TDD superpower for all go code **ALWAYS**
 
 ## Infrastructure as Code (Terraform)
 
-**AWS Profile**: All operations use `AWS_PROFILE` environment variable
+**AWS Profile**: All operations use `AWS_PROFILE` environment variable. Usually with the `ses-mail` profile.
 
 **Resources**:
 

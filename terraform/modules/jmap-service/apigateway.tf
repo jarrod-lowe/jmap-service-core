@@ -1,10 +1,18 @@
 # REST API Gateway with OpenAPI specification
 
+locals {
+  openapi_body = templatefile("${path.module}/openapi.yaml", {
+    cognito_user_pool_arn       = aws_cognito_user_pool.main.arn
+    aws_region                  = var.aws_region
+    get_jmap_session_lambda_arn = aws_lambda_function.get_jmap_session.arn
+  })
+}
+
 resource "aws_api_gateway_rest_api" "api" {
   name        = "jmap-service-${var.environment}"
   description = "JMAP Service API"
 
-  body = file("${path.module}/openapi.yaml")
+  body = local.openapi_body
 
   endpoint_configuration {
     types = ["REGIONAL"]
@@ -15,7 +23,7 @@ resource "aws_api_gateway_deployment" "api" {
   rest_api_id = aws_api_gateway_rest_api.api.id
 
   triggers = {
-    redeployment = sha1(file("${path.module}/openapi.yaml"))
+    redeployment = sha1(local.openapi_body)
   }
 
   lifecycle {

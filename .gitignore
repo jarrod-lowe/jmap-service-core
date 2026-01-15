@@ -21,3 +21,5 @@ terraform/environments/*/terraform.tfvars
 
 # Go dependencies
 go.sum
+
+test-user.yaml

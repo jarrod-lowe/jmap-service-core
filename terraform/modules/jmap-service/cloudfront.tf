@@ -25,6 +25,14 @@ resource "aws_acm_certificate_validation" "api" {
   }
 }
 
+# CloudFront Function for JMAP redirect
+resource "aws_cloudfront_function" "jmap_redirect" {
+  name    = "jmap-well-known-redirect-${var.environment}"
+  runtime = "cloudfront-js-2.0"
+  publish = true
+  code    = file("${path.module}/cloudfront-functions/jmap-redirect.js")
+}
+
 # CloudFront Distribution
 
 resource "aws_cloudfront_distribution" "api" {
@@ -38,13 +46,30 @@ resource "aws_cloudfront_distribution" "api" {
   origin {
     domain_name = "${aws_api_gateway_rest_api.api.id}.execute-api.${var.aws_region}.amazonaws.com"
     origin_id   = "api-gateway"
-    origin_path = "/v1"
+    # Note: No origin_path - clients access /v1/.well-known/jmap directly after redirect
 
     custom_origin_config {
       http_port              = 80
       https_port             = 443
       origin_protocol_policy = "https-only"
       origin_ssl_protocols   = ["TLSv1.2"]
+    }
+  }
+
+  # Redirect /.well-known/jmap to /v1/.well-known/jmap
+  ordered_cache_behavior {
+    path_pattern           = "/.well-known/jmap"
+    target_origin_id       = "api-gateway"
+    viewer_protocol_policy = "redirect-to-https"
+    allowed_methods        = ["GET", "HEAD"]
+    cached_methods         = ["GET", "HEAD"]
+    compress               = true
+
+    cache_policy_id = data.aws_cloudfront_cache_policy.caching_disabled.id
+
+    function_association {
+      event_type   = "viewer-request"
+      function_arn = aws_cloudfront_function.jmap_redirect.arn
     }
   }
 
