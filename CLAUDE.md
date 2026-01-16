@@ -11,6 +11,10 @@ This is a **JMAP (JSON Meta Application Protocol) email server** implementation 
 
 The test user credentials are in test-user.yaml, if it exists.
 
+Use the brainstorming superpower when doing design of new features.
+
+Do not write code to work around things that should be errors. For example: we define things like the environment variables on a lambda - so we shouldn't accept a variable not being set and just not do things.
+
 ## Build and Development Commands
 
 We will use a Makefile for presenting all the operations to the use (such as plans, cleans, applies, etc). Terraform will be used for infrastructure. See `../ses-mail` for an example of a project using those.
@@ -87,7 +91,8 @@ Returns `unknownMethod` error while processing other calls in same request
 - Co-located with source files using `_test.go` suffix
 - Covers specific scenarios, edge cases, error conditions
 - Integration tests for end-to-end JMAP request/response flows
-- Use the TDD superpower for all go code **ALWAYS**
+- Use the TDD superpower for all go code **ALWAYS**; correctly using dependency inversion to make testing easy
+- TDD RED tests should show a FAILURE in the result, which means they must actually compile, run and not panic
 
 ## Infrastructure as Code (Terraform)
 

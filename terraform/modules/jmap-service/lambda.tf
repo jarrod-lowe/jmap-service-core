@@ -91,8 +91,9 @@ resource "aws_lambda_function" "get_jmap_session" {
 
   environment {
     variables = {
-      ENVIRONMENT = var.environment
-      API_DOMAIN  = var.domain_name
+      ENVIRONMENT    = var.environment
+      API_DOMAIN     = var.domain_name
+      DYNAMODB_TABLE = aws_dynamodb_table.jmap_data.name
 
       # ADOT Collector Configuration
       OPENTELEMETRY_COLLECTOR_CONFIG_URI = "file:///var/task/collector.yaml"
@@ -118,6 +119,7 @@ resource "aws_lambda_function" "get_jmap_session" {
     aws_iam_role_policy_attachment.get_jmap_session_basic_execution,
     aws_iam_role_policy_attachment.get_jmap_session_xray_access,
     aws_iam_role_policy.get_jmap_session_cloudwatch_metrics,
+    aws_iam_role_policy.get_jmap_session_dynamodb,
     aws_cloudwatch_log_group.get_jmap_session_logs
   ]
 

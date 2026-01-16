@@ -9,6 +9,7 @@ import (
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
+	"github.com/jarrodlowe/jmap-service-core/internal/db"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda/xrayconfig"
 	"go.opentelemetry.io/otel"
@@ -20,6 +21,14 @@ var (
 		Level: slog.LevelInfo,
 	}))
 )
+
+// AccountStore defines the interface for account operations
+type AccountStore interface {
+	EnsureAccount(ctx context.Context, userID string) (*db.Account, error)
+}
+
+// accountStore is the package-level account store (injectable for testing)
+var accountStore AccountStore
 
 // JMAPSession represents the JMAP Session object per RFC 8620
 type JMAPSession struct {
@@ -110,6 +119,21 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 		slog.String("account_id", userID),
 	)
 
+	// Ensure account exists and update lastDiscoveryAccess
+	_, err = accountStore.EnsureAccount(ctx, userID)
+	if err != nil {
+		logger.ErrorContext(ctx, "Failed to ensure account",
+			slog.String("request_id", request.RequestContext.RequestID),
+			slog.String("account_id", userID),
+			slog.String("error", err.Error()),
+		)
+		return Response{
+			StatusCode: 500,
+			Headers:    map[string]string{"Content-Type": "application/json"},
+			Body:       `{"error":"Internal server error"}`,
+		}, nil
+	}
+
 	session := buildSession(userID, config)
 
 	bodyJSON, err := json.Marshal(session)
@@ -194,7 +218,9 @@ func buildSession(userID string, cfg Config) JMAPSession {
 }
 
 func main() {
-	tp, err := xrayconfig.NewTracerProvider(context.Background())
+	ctx := context.Background()
+
+	tp, err := xrayconfig.NewTracerProvider(ctx)
 	if err != nil {
 		logger.Error("FATAL: Failed to initialize tracer provider",
 			slog.String("error", err.Error()),
@@ -202,6 +228,21 @@ func main() {
 		panic(err)
 	}
 	otel.SetTracerProvider(tp)
+
+	// Initialize DynamoDB client with OTel instrumentation
+	tableName := os.Getenv("DYNAMODB_TABLE")
+	if tableName == "" {
+		logger.Error("FATAL: DYNAMODB_TABLE environment variable is required")
+		panic("DYNAMODB_TABLE environment variable is required")
+	}
+	dbClient, err := db.NewClient(ctx, tableName)
+	if err != nil {
+		logger.Error("FATAL: Failed to initialize DynamoDB client",
+			slog.String("error", err.Error()),
+		)
+		panic(err)
+	}
+	accountStore = dbClient
 
 	lambda.Start(otellambda.InstrumentHandler(handler, xrayconfig.WithRecommendedOptions(tp)...))
 }

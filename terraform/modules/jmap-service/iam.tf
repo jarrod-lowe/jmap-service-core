@@ -90,3 +90,21 @@ resource "aws_iam_role_policy" "get_jmap_session_cloudwatch_metrics" {
   role   = aws_iam_role.get_jmap_session_execution.id
   policy = data.aws_iam_policy_document.hello_world_cloudwatch_metrics.json
 }
+
+# IAM policy for DynamoDB access
+data "aws_iam_policy_document" "get_jmap_session_dynamodb" {
+  statement {
+    effect = "Allow"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:UpdateItem"
+    ]
+    resources = [aws_dynamodb_table.jmap_data.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "get_jmap_session_dynamodb" {
+  name   = "${local.resource_prefix}-get-jmap-session-dynamodb-${var.environment}"
+  role   = aws_iam_role.get_jmap_session_execution.id
+  policy = data.aws_iam_policy_document.get_jmap_session_dynamodb.json
+}

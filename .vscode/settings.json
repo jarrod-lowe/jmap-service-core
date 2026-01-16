@@ -1,9 +1,11 @@
 {
     "cSpell.words": [
         "ADOT",
+        "attributevalue",
         "authtype",
         "AWSX",
         "contrib",
+        "dynamodbav",
         "GOARCH",
         "golangci",
         "GOOS",

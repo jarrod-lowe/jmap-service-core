@@ -3,16 +3,39 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/aws/aws-lambda-go/events"
+	"github.com/jarrodlowe/jmap-service-core/internal/db"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace/noop"
 )
 
+// mockAccountStore implements AccountStore for testing
+type mockAccountStore struct {
+	ensureAccountFunc func(ctx context.Context, userID string) (*db.Account, error)
+	calledWith        string
+}
+
+func (m *mockAccountStore) EnsureAccount(ctx context.Context, userID string) (*db.Account, error) {
+	m.calledWith = userID
+	if m.ensureAccountFunc != nil {
+		return m.ensureAccountFunc(ctx, userID)
+	}
+	return &db.Account{
+		UserID:              userID,
+		Owner:               "USER#" + userID,
+		CreatedAt:           "2024-01-01T00:00:00Z",
+		LastDiscoveryAccess: "2024-01-01T00:00:00Z",
+	}, nil
+}
+
 func setupTest() {
 	tp := noop.NewTracerProvider()
 	otel.SetTracerProvider(tp)
+	// Use a mock account store for tests
+	accountStore = &mockAccountStore{}
 }
 
 func TestHandler_ValidRequest_ReturnsJMAPSession(t *testing.T) {
@@ -278,3 +301,64 @@ func TestBuildSession_WithInjectedConfig(t *testing.T) {
 		t.Error("expected account with ID 'user-123' to exist")
 	}
 }
+
+func TestHandler_CallsEnsureAccount(t *testing.T) {
+	setupTest()
+	mock := &mockAccountStore{}
+	accountStore = mock
+	ctx := context.Background()
+
+	request := events.APIGatewayProxyRequest{
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "test-request-id",
+			Authorizer: map[string]any{
+				"claims": map[string]any{
+					"sub": "user-ensure-test",
+				},
+			},
+		},
+	}
+
+	_, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	if mock.calledWith != "user-ensure-test" {
+		t.Errorf("Expected EnsureAccount to be called with 'user-ensure-test', got '%s'", mock.calledWith)
+	}
+}
+
+func TestHandler_EnsureAccountError_Returns500(t *testing.T) {
+	setupTest()
+	mock := &mockAccountStore{
+		ensureAccountFunc: func(ctx context.Context, userID string) (*db.Account, error) {
+			return nil, errors.New("DynamoDB error")
+		},
+	}
+	accountStore = mock
+	ctx := context.Background()
+
+	request := events.APIGatewayProxyRequest{
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "test-request-id",
+			Authorizer: map[string]any{
+				"claims": map[string]any{
+					"sub": "user-error-test",
+				},
+			},
+		},
+	}
+
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	if response.StatusCode != 500 {
+		t.Errorf("Expected status code 500 when EnsureAccount fails, got %d", response.StatusCode)
+	}
+}
+
+// Ensure errors import is used
+var _ = errors.New
