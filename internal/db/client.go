@@ -24,6 +24,7 @@ const (
 // DynamoDBClient defines the interface for DynamoDB operations
 type DynamoDBClient interface {
 	UpdateItem(ctx context.Context, params *dynamodb.UpdateItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
+	Query(ctx context.Context, params *dynamodb.QueryInput, optFns ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error)
 }
 
 // Client wraps DynamoDB operations with OTel tracing
@@ -116,4 +117,29 @@ func (c *Client) EnsureAccount(ctx context.Context, userID string) (*Account, er
 	account.UserID = userID
 
 	return &account, nil
+}
+
+// QueryByPK queries all items with the given partition key.
+// Returns the raw DynamoDB attribute maps for flexibility.
+func (c *Client) QueryByPK(ctx context.Context, pk string) ([]map[string]types.AttributeValue, error) {
+	keyCondition := expression.Key("pk").Equal(expression.Value(pk))
+
+	expr, err := expression.NewBuilder().WithKeyCondition(keyCondition).Build()
+	if err != nil {
+		return nil, fmt.Errorf("failed to build query expression: %w", err)
+	}
+
+	input := &dynamodb.QueryInput{
+		TableName:                 aws.String(c.tableName),
+		KeyConditionExpression:    expr.KeyCondition(),
+		ExpressionAttributeNames:  expr.Names(),
+		ExpressionAttributeValues: expr.Values(),
+	}
+
+	output, err := c.ddb.Query(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+
+	return output.Items, nil
 }

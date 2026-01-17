@@ -13,6 +13,12 @@ import (
 type mockDynamoDBClient struct {
 	updateItemFunc func(ctx context.Context, params *dynamodb.UpdateItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
 	item           map[string]types.AttributeValue
+
+	// Query support
+	queryFunc   func(ctx context.Context, params *dynamodb.QueryInput, optFns ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error)
+	queryOutput *dynamodb.QueryOutput
+	queryCalled bool
+	queryInput  *dynamodb.QueryInput
 }
 
 func (m *mockDynamoDBClient) UpdateItem(ctx context.Context, params *dynamodb.UpdateItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
@@ -22,6 +28,18 @@ func (m *mockDynamoDBClient) UpdateItem(ctx context.Context, params *dynamodb.Up
 	return &dynamodb.UpdateItemOutput{
 		Attributes: m.item,
 	}, nil
+}
+
+func (m *mockDynamoDBClient) Query(ctx context.Context, params *dynamodb.QueryInput, optFns ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
+	m.queryCalled = true
+	m.queryInput = params
+	if m.queryFunc != nil {
+		return m.queryFunc(ctx, params, optFns...)
+	}
+	if m.queryOutput != nil {
+		return m.queryOutput, nil
+	}
+	return &dynamodb.QueryOutput{Items: []map[string]types.AttributeValue{}}, nil
 }
 
 func TestEnsureAccount_CreatesNewAccount(t *testing.T) {

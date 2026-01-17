@@ -5,6 +5,7 @@ locals {
     cognito_user_pool_arn       = aws_cognito_user_pool.main.arn
     aws_region                  = var.aws_region
     get_jmap_session_lambda_arn = aws_lambda_function.get_jmap_session.arn
+    jmap_api_lambda_arn         = aws_lambda_function.jmap_api.arn
   })
 }
 

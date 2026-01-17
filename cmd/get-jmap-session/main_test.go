@@ -8,6 +8,7 @@ import (
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/jarrodlowe/jmap-service-core/internal/db"
+	"github.com/jarrodlowe/jmap-service-core/internal/plugin"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace/noop"
 )
@@ -36,6 +37,8 @@ func setupTest() {
 	otel.SetTracerProvider(tp)
 	// Use a mock account store for tests
 	accountStore = &mockAccountStore{}
+	// Use an empty plugin registry for tests
+	pluginRegistry = plugin.NewRegistry()
 }
 
 func TestHandler_ValidRequest_ReturnsJMAPSession(t *testing.T) {
@@ -229,38 +232,48 @@ func TestHandler_CoreCapabilityValues(t *testing.T) {
 	var session JMAPSession
 	json.Unmarshal([]byte(response.Body), &session)
 
-	core := session.Capabilities["urn:ietf:params:jmap:core"]
+	coreAny, ok := session.Capabilities["urn:ietf:params:jmap:core"]
+	if !ok {
+		t.Fatal("core capability not found")
+	}
+
+	// After JSON unmarshal, capabilities are maps
+	core, ok := coreAny.(map[string]any)
+	if !ok {
+		t.Fatal("core capability is not a map")
+	}
 
 	// RFC 8620 Section 2: Core capability required fields
-	if core.MaxSizeUpload <= 0 {
+	if maxSizeUpload, _ := core["maxSizeUpload"].(float64); maxSizeUpload <= 0 {
 		t.Error("maxSizeUpload must be positive")
 	}
 
-	if core.MaxConcurrentUpload <= 0 {
+	if maxConcurrentUpload, _ := core["maxConcurrentUpload"].(float64); maxConcurrentUpload <= 0 {
 		t.Error("maxConcurrentUpload must be positive")
 	}
 
-	if core.MaxSizeRequest <= 0 {
+	if maxSizeRequest, _ := core["maxSizeRequest"].(float64); maxSizeRequest <= 0 {
 		t.Error("maxSizeRequest must be positive")
 	}
 
-	if core.MaxConcurrentRequests <= 0 {
+	if maxConcurrentRequests, _ := core["maxConcurrentRequests"].(float64); maxConcurrentRequests <= 0 {
 		t.Error("maxConcurrentRequests must be positive")
 	}
 
-	if core.MaxCallsInRequest <= 0 {
+	if maxCallsInRequest, _ := core["maxCallsInRequest"].(float64); maxCallsInRequest <= 0 {
 		t.Error("maxCallsInRequest must be positive")
 	}
 
-	if core.MaxObjectsInGet <= 0 {
+	if maxObjectsInGet, _ := core["maxObjectsInGet"].(float64); maxObjectsInGet <= 0 {
 		t.Error("maxObjectsInGet must be positive")
 	}
 
-	if core.MaxObjectsInSet <= 0 {
+	if maxObjectsInSet, _ := core["maxObjectsInSet"].(float64); maxObjectsInSet <= 0 {
 		t.Error("maxObjectsInSet must be positive")
 	}
 
-	if len(core.CollationAlgorithms) == 0 {
+	collation, ok := core["collationAlgorithms"].([]any)
+	if !ok || len(collation) == 0 {
 		t.Error("collationAlgorithms must have at least one entry")
 	}
 }
@@ -269,7 +282,7 @@ func TestHandler_CoreCapabilityValues(t *testing.T) {
 // This test uses direct Config injection - no environment variables needed
 func TestBuildSession_WithInjectedConfig(t *testing.T) {
 	cfg := Config{APIDomain: "test.example.com"}
-	session := buildSession("user-123", cfg)
+	session := buildSession("user-123", cfg, nil)
 
 	// Verify URLs use the injected domain
 	expectedAPIUrl := "https://test.example.com/v1/jmap"

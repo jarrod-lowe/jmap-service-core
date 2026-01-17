@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/jarrodlowe/jmap-service-core/internal/db"
+	"github.com/jarrodlowe/jmap-service-core/internal/plugin"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda/xrayconfig"
 	"go.opentelemetry.io/otel"
@@ -30,17 +31,20 @@ type AccountStore interface {
 // accountStore is the package-level account store (injectable for testing)
 var accountStore AccountStore
 
+// pluginRegistry holds loaded plugin configuration (injectable for testing)
+var pluginRegistry *plugin.Registry
+
 // JMAPSession represents the JMAP Session object per RFC 8620
 type JMAPSession struct {
-	Capabilities    map[string]CoreCapability `json:"capabilities"`
-	Accounts        map[string]Account        `json:"accounts"`
-	PrimaryAccounts map[string]string         `json:"primaryAccounts"`
-	Username        string                    `json:"username"`
-	APIUrl          string                    `json:"apiUrl"`
-	DownloadUrl     string                    `json:"downloadUrl"`
-	UploadUrl       string                    `json:"uploadUrl"`
-	EventSourceUrl  string                    `json:"eventSourceUrl"`
-	State           string                    `json:"state"`
+	Capabilities    map[string]any     `json:"capabilities"`
+	Accounts        map[string]Account `json:"accounts"`
+	PrimaryAccounts map[string]string  `json:"primaryAccounts"`
+	Username        string             `json:"username"`
+	APIUrl          string             `json:"apiUrl"`
+	DownloadUrl     string             `json:"downloadUrl"`
+	UploadUrl       string             `json:"uploadUrl"`
+	EventSourceUrl  string             `json:"eventSourceUrl"`
+	State           string             `json:"state"`
 }
 
 // CoreCapability represents the urn:ietf:params:jmap:core capability
@@ -134,7 +138,7 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 		}, nil
 	}
 
-	session := buildSession(userID, config)
+	session := buildSession(userID, config, pluginRegistry)
 
 	bodyJSON, err := json.Marshal(session)
 	if err != nil {
@@ -179,41 +183,63 @@ func extractSubClaim(request events.APIGatewayProxyRequest) (string, error) {
 	return sub, nil
 }
 
-func buildSession(userID string, cfg Config) JMAPSession {
+func buildSession(userID string, cfg Config, registry *plugin.Registry) JMAPSession {
 	baseURL := fmt.Sprintf("https://%s/v1", cfg.APIDomain)
 
-	return JMAPSession{
-		Capabilities: map[string]CoreCapability{
-			coreCapability: {
-				MaxSizeUpload:         50000000,
-				MaxConcurrentUpload:   4,
-				MaxSizeRequest:        10000000,
-				MaxConcurrentRequests: 4,
-				MaxCallsInRequest:     16,
-				MaxObjectsInGet:       500,
-				MaxObjectsInSet:       500,
-				CollationAlgorithms:   []string{"i;ascii-casemap"},
-			},
+	// Build capabilities map starting with core
+	capabilities := map[string]any{
+		coreCapability: CoreCapability{
+			MaxSizeUpload:         50000000,
+			MaxConcurrentUpload:   4,
+			MaxSizeRequest:        10000000,
+			MaxConcurrentRequests: 4,
+			MaxCallsInRequest:     16,
+			MaxObjectsInGet:       500,
+			MaxObjectsInSet:       500,
+			CollationAlgorithms:   []string{"i;ascii-casemap"},
 		},
+	}
+
+	// Build account capabilities starting with core
+	accountCapabilities := map[string]any{
+		coreCapability: map[string]any{},
+	}
+
+	// Build primary accounts starting with core
+	primaryAccounts := map[string]string{
+		coreCapability: userID,
+	}
+
+	// Add plugin capabilities if registry is available
+	if registry != nil {
+		for _, cap := range registry.GetCapabilities() {
+			capConfig := registry.GetCapabilityConfig(cap)
+			if capConfig == nil {
+				capConfig = map[string]any{}
+			}
+			capabilities[cap] = capConfig
+			accountCapabilities[cap] = map[string]any{}
+			primaryAccounts[cap] = userID
+		}
+	}
+
+	return JMAPSession{
+		Capabilities: capabilities,
 		Accounts: map[string]Account{
 			userID: {
-				Name:       "mailbox",
-				IsPersonal: true,
-				IsReadOnly: false,
-				AccountCapabilities: map[string]any{
-					coreCapability: map[string]any{},
-				},
+				Name:                "mailbox",
+				IsPersonal:          true,
+				IsReadOnly:          false,
+				AccountCapabilities: accountCapabilities,
 			},
 		},
-		PrimaryAccounts: map[string]string{
-			coreCapability: userID,
-		},
-		Username:       userID,
-		APIUrl:         fmt.Sprintf("%s/jmap", baseURL),
-		DownloadUrl:    fmt.Sprintf("%s/download/{accountId}/{blobId}/{name}", baseURL),
-		UploadUrl:      fmt.Sprintf("%s/upload/{accountId}", baseURL),
-		EventSourceUrl: fmt.Sprintf("%s/events/{types}/{closeafter}/{ping}", baseURL),
-		State:          "0",
+		PrimaryAccounts: primaryAccounts,
+		Username:        userID,
+		APIUrl:          fmt.Sprintf("%s/jmap", baseURL),
+		DownloadUrl:     fmt.Sprintf("%s/download/{accountId}/{blobId}/{name}", baseURL),
+		UploadUrl:       fmt.Sprintf("%s/upload/{accountId}", baseURL),
+		EventSourceUrl:  fmt.Sprintf("%s/events/{types}/{closeafter}/{ping}", baseURL),
+		State:           "0",
 	}
 }
 
@@ -243,6 +269,15 @@ func main() {
 		panic(err)
 	}
 	accountStore = dbClient
+
+	// Load plugin registry
+	pluginRegistry = plugin.NewRegistry()
+	if err := pluginRegistry.LoadFromDynamoDB(ctx, dbClient); err != nil {
+		logger.Error("FATAL: Failed to load plugin registry",
+			slog.String("error", err.Error()),
+		)
+		panic(err)
+	}
 
 	lambda.Start(otellambda.InstrumentHandler(handler, xrayconfig.WithRecommendedOptions(tp)...))
 }

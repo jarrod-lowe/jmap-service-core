@@ -13,6 +13,11 @@ components:
         type: cognito_user_pools
         providerARNs:
           - "${cognito_user_pool_arn}"
+    IamAuthorizer:
+      type: apiKey
+      name: Authorization
+      in: header
+      x-amazon-apigateway-authtype: awsSigv4
 paths:
   /health:
     get:
@@ -58,4 +63,93 @@ paths:
         type: aws_proxy
         httpMethod: POST
         uri: "arn:aws:apigateway:${aws_region}:lambda:path/2015-03-31/functions/${get_jmap_session_lambda_arn}/invocations"
+        passthroughBehavior: when_no_match
+  /jmap:
+    post:
+      summary: "JMAP API"
+      description: "JMAP method invocation endpoint per RFC 8620"
+      operationId: "postJmap"
+      security:
+        - CognitoAuthorizer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                using:
+                  type: array
+                  items:
+                    type: string
+                methodCalls:
+                  type: array
+                  items:
+                    type: array
+              required:
+                - using
+                - methodCalls
+      responses:
+        "200":
+          description: "JMAP response"
+          content:
+            application/json:
+              schema:
+                type: object
+        "400":
+          description: "Bad request"
+        "401":
+          description: "Unauthorized"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "arn:aws:apigateway:${aws_region}:lambda:path/2015-03-31/functions/${jmap_api_lambda_arn}/invocations"
+        passthroughBehavior: when_no_match
+  /jmap-iam/{accountId}:
+    post:
+      summary: "JMAP API (IAM Auth)"
+      description: "JMAP method invocation endpoint for machine clients with IAM authentication"
+      operationId: "postJmapIam"
+      security:
+        - IamAuthorizer: []
+      parameters:
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "Target account ID for the JMAP operations"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                using:
+                  type: array
+                  items:
+                    type: string
+                methodCalls:
+                  type: array
+                  items:
+                    type: array
+              required:
+                - using
+                - methodCalls
+      responses:
+        "200":
+          description: "JMAP response"
+          content:
+            application/json:
+              schema:
+                type: object
+        "400":
+          description: "Bad request"
+        "403":
+          description: "Forbidden"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "arn:aws:apigateway:${aws_region}:lambda:path/2015-03-31/functions/${jmap_api_lambda_arn}/invocations"
         passthroughBehavior: when_no_match
