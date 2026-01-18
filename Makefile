@@ -9,7 +9,7 @@ $(error ENV must be 'test' or 'prod'. Usage: make <target> ENV=test)
 endif
 
 # Lambda definitions - add new lambdas here
-LAMBDAS = get-jmap-session jmap-api
+LAMBDAS = get-jmap-session jmap-api core-echo
 
 # Directories
 BUILD_DIR = build

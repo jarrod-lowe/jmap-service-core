@@ -26,7 +26,16 @@ resource "aws_dynamodb_table_item" "core_plugin" {
         }
       }
     }
-    methods      = { M = {} }
+    methods = {
+      M = {
+        "Core/echo" = {
+          M = {
+            invocationType = { S = "lambda-invoke" }
+            invokeTarget   = { S = aws_lambda_function.core_echo.arn }
+          }
+        }
+      }
+    }
     registeredAt = { S = "2025-01-17T00:00:00Z" }
     version      = { S = "1.0.0" }
   })

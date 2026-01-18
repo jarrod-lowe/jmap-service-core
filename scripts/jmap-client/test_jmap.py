@@ -333,6 +333,120 @@ def test_email_query(api_url: str, token: str, session_data: dict, results: Test
         results.record_fail("methodResponses has at least one response", "Array is empty")
 
 
+def test_core_echo(api_url: str, token: str, session_data: dict, results: TestResult):
+    """
+    Test 4: Core/echo Method Call
+
+    Per RFC 8620 Section 3.5, Core/echo echoes back its arguments unchanged.
+    This tests authenticated connection to the JMAP API.
+    """
+    print()
+    print("Testing Core/echo (POST to apiUrl)...")
+
+    # Get apiUrl
+    api_endpoint = session_data.get("apiUrl")
+    if not api_endpoint:
+        results.record_fail("Core/echo request", "No apiUrl in session")
+        return
+
+    # Build JMAP request with test arguments
+    test_args = {
+        "hello": True,
+        "count": 42,
+        "nested": {"key": "value", "array": [1, 2, 3]},
+    }
+
+    jmap_request = {
+        "using": ["urn:ietf:params:jmap:core"],
+        "methodCalls": [["Core/echo", test_args, "echo1"]],
+    }
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        response = requests.post(
+            api_endpoint, headers=headers, json=jmap_request, timeout=30
+        )
+    except requests.RequestException as e:
+        results.record_fail("Core/echo request", str(e))
+        return
+
+    # Test: HTTP 200 response
+    if response.status_code == 200:
+        results.record_pass("Core/echo returns 200")
+    else:
+        results.record_fail(
+            "Core/echo returns 200", f"Got HTTP {response.status_code}: {response.text}"
+        )
+        return
+
+    # Parse JSON response
+    try:
+        response_data = response.json()
+    except json.JSONDecodeError as e:
+        results.record_fail("Core/echo returns valid JSON", str(e))
+        return
+
+    results.record_pass("Core/echo returns valid JSON")
+
+    # Validate JMAP response structure
+    if "methodResponses" not in response_data or not isinstance(
+        response_data["methodResponses"], list
+    ):
+        results.record_fail(
+            "Response has methodResponses array",
+            f"Got: {type(response_data.get('methodResponses'))}",
+        )
+        return
+
+    if len(response_data["methodResponses"]) == 0:
+        results.record_fail("methodResponses has at least one response", "Array is empty")
+        return
+
+    method_response = response_data["methodResponses"][0]
+    if not isinstance(method_response, list) or len(method_response) < 3:
+        results.record_fail(
+            "Method response is [name, args, callId] tuple",
+            f"Got: {method_response}",
+        )
+        return
+
+    method_name = method_response[0]
+    method_args = method_response[1]
+    call_id = method_response[2]
+
+    # Test: Response call_id should match request call_id
+    if call_id == "echo1":
+        results.record_pass("Core/echo response call_id matches request")
+    else:
+        results.record_fail(
+            "Core/echo response call_id matches request",
+            f"Expected 'echo1', got '{call_id}'",
+        )
+
+    # Test: Method name should be Core/echo
+    if method_name == "Core/echo":
+        results.record_pass("Response method is 'Core/echo'")
+    else:
+        results.record_fail(
+            "Response method is 'Core/echo'",
+            f"Got: {method_name}",
+        )
+        return
+
+    # Test: Arguments should be echoed back exactly
+    if method_args == test_args:
+        results.record_pass("Core/echo echoed arguments exactly")
+    else:
+        results.record_fail(
+            "Core/echo echoed arguments exactly",
+            f"Expected: {test_args}\nGot: {method_args}",
+        )
+
+
 def print_summary(results: TestResult):
     """Print test summary."""
     print()
@@ -371,6 +485,9 @@ def main():
 
         # Test 3: Email/query
         test_email_query(api_url, token, session_data, results)
+
+        # Test 4: Core/echo
+        test_core_echo(api_url, token, session_data, results)
 
     # Print summary
     print_summary(results)
