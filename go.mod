@@ -1,4 +1,4 @@
-module github.com/jarrodlowe/jmap-service-core
+module github.com/jarrod-lowe/jmap-service-core
 
 go 1.24.6
 

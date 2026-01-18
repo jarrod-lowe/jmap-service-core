@@ -13,7 +13,7 @@ Plugins register themselves by creating a DynamoDB record in the core service's 
 ### DynamoDB Record Schema
 
 | Field | Type | Description |
-|-------|------|-------------|
+| ----- | ---- | ----------- |
 | `pk` | String | Always `"PLUGIN#"` |
 | `sk` | String | `"PLUGIN#<plugin-name>"` |
 | `pluginId` | String | Unique identifier for the plugin |
@@ -63,7 +63,7 @@ The `capabilities` map defines JMAP capabilities this plugin provides. Keys are 
 The `methods` map defines which JMAP methods this plugin handles. Keys are method names (e.g., `Email/get`), values define how to invoke the handler:
 
 | Field | Type | Description |
-|-------|------|-------------|
+| ----- | ---- | ----------- |
 | `invocationType` | String | Currently only `"lambda-invoke"` is supported |
 | `invokeTarget` | String | Lambda function ARN |
 
@@ -89,7 +89,7 @@ When the core service invokes a plugin, it sends this JSON payload:
 ```
 
 | Field | Type | Description |
-|-------|------|-------------|
+| ----- | ---- | ----------- |
 | `requestId` | String | API Gateway request ID for correlation |
 | `callIndex` | Integer | Position of this call in the methodCalls array |
 | `accountId` | String | Authenticated account ID |
@@ -114,7 +114,7 @@ When the core service invokes a plugin, it sends this JSON payload:
 ```
 
 | Field | Type | Description |
-|-------|------|-------------|
+| ----- | ---- | ----------- |
 | `methodResponse.name` | String | Method name for the response |
 | `methodResponse.args` | Object | JMAP response data |
 | `methodResponse.clientId` | String | Echo back the client ID from request |
@@ -137,6 +137,7 @@ For JMAP-level errors (invalid arguments, not found, etc.):
 ```
 
 Standard JMAP error types (RFC 8620 Section 3.6.2):
+
 - `unknownMethod` - Method not supported
 - `invalidArguments` - Invalid method arguments
 - `invalidResultReference` - Back-reference resolution failed
@@ -290,4 +291,29 @@ Clients can then use any capability advertised in the session.
 2. **Idempotency**: Import operations should be idempotent using Message-ID or similar
 3. **Timeouts**: Plugin Lambdas should complete within 25 seconds
 4. **Logging**: Include `requestId` and `accountId` in all log entries for tracing
-5. **Versioning**: Update the `version` field when changing plugin behavior
+5. **Versioning**: Update the `version` field when changing plugin behaviour
+
+## Go Plugin Development
+
+For Go-based plugins, import the contract types directly from the core module:
+
+```go
+import "github.com/jarrod-lowe/jmap-service-core/pkg/plugincontract"
+
+func handler(ctx context.Context, req plugincontract.PluginInvocationRequest) (plugincontract.PluginInvocationResponse, error) {
+    // Handle the request
+    return plugincontract.PluginInvocationResponse{
+        MethodResponse: plugincontract.MethodResponse{
+            Name:     req.Method,
+            Args:     map[string]any{"accountId": req.AccountID},
+            ClientID: req.ClientID,
+        },
+    }, nil
+}
+```
+
+Available types in `pkg/plugincontract`:
+
+- `PluginInvocationRequest` - Request payload sent from core to plugin
+- `PluginInvocationResponse` - Response wrapper from plugin to core
+- `MethodResponse` - JMAP method response structure

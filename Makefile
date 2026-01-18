@@ -73,7 +73,7 @@ go.mod: $(GO_SOURCES)
 	@echo "Checking Go module dependencies..."
 	@if [ ! -f go.mod ]; then \
 		echo "Initializing Go module..."; \
-		go mod init github.com/jarrodlowe/jmap-service-core; \
+		go mod init github.com/jarrod-lowe/jmap-service-core; \
 	fi
 	@go mod tidy
 	@touch go.mod
@@ -118,13 +118,15 @@ test:
 	go test -v ./...
 
 # Run linter - MUST be installed
+# PATH includes ~/go/bin for go-installed tools
 lint:
-	@if ! command -v golangci-lint >/dev/null 2>&1; then \
+	@PATH="$(HOME)/go/bin:$$PATH"; \
+	if ! command -v golangci-lint >/dev/null 2>&1; then \
 		echo "ERROR: golangci-lint is not installed"; \
 		echo "Install it with: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest"; \
 		exit 1; \
-	fi
-	@echo "Running golangci-lint..."
+	fi; \
+	echo "Running golangci-lint..."; \
 	golangci-lint run ./...
 
 # Format Terraform files - depends on actual .tf files

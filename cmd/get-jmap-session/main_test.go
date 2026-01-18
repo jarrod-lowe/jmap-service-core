@@ -7,8 +7,8 @@ import (
 	"testing"
 
 	"github.com/aws/aws-lambda-go/events"
-	"github.com/jarrodlowe/jmap-service-core/internal/db"
-	"github.com/jarrodlowe/jmap-service-core/internal/plugin"
+	"github.com/jarrod-lowe/jmap-service-core/internal/db"
+	"github.com/jarrod-lowe/jmap-service-core/internal/plugin"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace/noop"
 )
@@ -230,7 +230,9 @@ func TestHandler_CoreCapabilityValues(t *testing.T) {
 	response, _ := handler(ctx, request)
 
 	var session JMAPSession
-	json.Unmarshal([]byte(response.Body), &session)
+	if err := json.Unmarshal([]byte(response.Body), &session); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
 
 	coreAny, ok := session.Capabilities["urn:ietf:params:jmap:core"]
 	if !ok {
