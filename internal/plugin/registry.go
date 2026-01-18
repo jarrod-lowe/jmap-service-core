@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"fmt"
+	"maps"
 
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
@@ -10,9 +11,6 @@ import (
 
 // PluginPrefix is the partition key prefix for plugin records
 const PluginPrefix = "PLUGIN#"
-
-// CoreCapability is the URN for the core JMAP capability
-const CoreCapability = "urn:ietf:params:jmap:core"
 
 // PluginQuerier defines the interface for querying plugins from storage
 type PluginQuerier interface {
@@ -27,13 +25,11 @@ type Registry struct {
 	plugins          []PluginRecord
 }
 
-// NewRegistry creates a registry with built-in core capability
+// NewRegistry creates an empty registry
 func NewRegistry() *Registry {
 	return &Registry{
-		methodMap: make(map[string]MethodTarget),
-		capabilitySet: map[string]bool{
-			CoreCapability: true, // Core is always available
-		},
+		methodMap:        make(map[string]MethodTarget),
+		capabilitySet:    make(map[string]bool),
 		capabilityConfig: make(map[string]map[string]any),
 		plugins:          []PluginRecord{},
 	}
@@ -59,10 +55,16 @@ func (r *Registry) LoadFromDynamoDB(ctx context.Context, querier PluginQuerier) 
 			r.methodMap[method] = target
 		}
 
-		// Index capabilities
+		// Index capabilities with merging
 		for capability, config := range record.Capabilities {
 			r.capabilitySet[capability] = true
-			r.capabilityConfig[capability] = config
+			if existing, ok := r.capabilityConfig[capability]; ok {
+				// Merge: new config values overwrite existing
+				maps.Copy(existing, config)
+			} else {
+				// Make a copy to avoid aliasing
+				r.capabilityConfig[capability] = maps.Clone(config)
+			}
 		}
 	}
 

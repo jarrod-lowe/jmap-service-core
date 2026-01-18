@@ -1,0 +1,3 @@
+jmapc
+requests
+pyyaml

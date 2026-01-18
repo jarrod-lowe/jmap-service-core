@@ -218,3 +218,62 @@ func TestRegistry_MultiplePlugins_MergesMethods(t *testing.T) {
 		}
 	}
 }
+
+func TestRegistry_LoadFromDynamoDB_MergesCapabilityConfig(t *testing.T) {
+	// Two plugins contribute to the same capability - configs should be merged
+	mock := &mockQuerier{
+		items: []map[string]types.AttributeValue{
+			createTestPluginItem("core-base", map[string]map[string]any{
+				"urn:ietf:params:jmap:core": {
+					"maxSizeUpload":       float64(50000000),
+					"maxConcurrentUpload": float64(4),
+				},
+			}, map[string]MethodTarget{}),
+			createTestPluginItem("core-extended", map[string]map[string]any{
+				"urn:ietf:params:jmap:core": {
+					"maxSizeRequest":    float64(10000000),
+					"maxConcurrentUpload": float64(8), // Override the previous value
+				},
+			}, map[string]MethodTarget{}),
+		},
+	}
+
+	registry := NewRegistry()
+	err := registry.LoadFromDynamoDB(context.Background(), mock)
+	if err != nil {
+		t.Fatalf("LoadFromDynamoDB returned error: %v", err)
+	}
+
+	config := registry.GetCapabilityConfig("urn:ietf:params:jmap:core")
+	if config == nil {
+		t.Fatal("Expected non-nil capability config for core")
+	}
+
+	// Value from first plugin should be present
+	if maxUpload, ok := config["maxSizeUpload"].(float64); !ok || maxUpload != 50000000 {
+		t.Errorf("Expected maxSizeUpload=50000000 from first plugin, got %v", config["maxSizeUpload"])
+	}
+
+	// Value from second plugin should be present
+	if maxRequest, ok := config["maxSizeRequest"].(float64); !ok || maxRequest != 10000000 {
+		t.Errorf("Expected maxSizeRequest=10000000 from second plugin, got %v", config["maxSizeRequest"])
+	}
+
+	// Overwritten value should have the later value
+	if maxConcurrentUpload, ok := config["maxConcurrentUpload"].(float64); !ok || maxConcurrentUpload != 8 {
+		t.Errorf("Expected maxConcurrentUpload=8 (overwritten), got %v", config["maxConcurrentUpload"])
+	}
+}
+
+func TestRegistry_NewRegistry_HasNoCapabilities(t *testing.T) {
+	registry := NewRegistry()
+
+	caps := registry.GetCapabilities()
+	if len(caps) != 0 {
+		t.Errorf("Expected empty registry to have no capabilities, got %d", len(caps))
+	}
+
+	if registry.HasCapability("urn:ietf:params:jmap:core") {
+		t.Error("Expected empty registry to not have core capability")
+	}
+}

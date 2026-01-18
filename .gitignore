@@ -12,6 +12,9 @@ terraform.destroy.plan
 .fmt
 terraform/environments/*/terraform.tfvars
 
+# Python venv
+scripts/.venv/
+
 # IDE
 .vscode/
 .idea/

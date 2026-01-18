@@ -38,6 +38,28 @@ We will use a Makefile for presenting all the operations to the use (such as pla
 
 Use a single dynamodb table (with single table design) for data. Use S3 for blob (e.g. message) storage. In the future, there may need to be some other storage for vectors for search.
 
+### Plugin System
+
+JMAP capabilities are managed through a plugin registry stored in DynamoDB. This allows capabilities to be configured without code changes.
+
+**Plugin Record Structure** (DynamoDB):
+
+```text
+pk: "PLUGIN#"
+sk: "PLUGIN#<pluginId>"
+pluginId: string
+capabilities: map[capabilityURN]map[string]any  // e.g., "urn:ietf:params:jmap:core" -> {maxSizeUpload: 50000000, ...}
+methods: map[methodName]MethodTarget            // e.g., "Email/get" -> {invocationType: "lambda-invoke", invokeTarget: "arn:..."}
+registeredAt: string (ISO 8601)
+version: string
+```
+
+**Core Capability**: The `urn:ietf:params:jmap:core` capability is defined in `terraform/modules/jmap-service/plugins.tf` and loaded like any other plugin. It contains all RFC 8620 required fields (maxSizeUpload, maxConcurrentUpload, etc.).
+
+**Capability Config Merging**: When multiple plugins contribute to the same capability URN, their configs are merged (later values overwrite earlier ones). This allows plugins to extend capabilities.
+
+**Session Building**: The `GetJmapSessionFunction` loads all plugins from DynamoDB and builds the session response by iterating over all registered capabilities uniformly - no special-casing for any capability.
+
 ### Authentication Flow
 
 **User Flow (Cognito JWT)**:
@@ -93,6 +115,31 @@ Returns `unknownMethod` error while processing other calls in same request
 - Integration tests for end-to-end JMAP request/response flows
 - Use the TDD superpower for all go code **ALWAYS**; correctly using dependency inversion to make testing easy
 - TDD RED tests should show a FAILURE in the result, which means they must actually compile, run and not panic
+
+### JMAP Protocol Compliance Tests
+
+Located in `scripts/jmap-client/`, these tests use the independent `jmapc` Python library to validate RFC 8620 compliance from a real client's perspective.
+
+**Running the tests:**
+
+```bash
+AWS_PROFILE=ses-mail make jmap-client-test ENV=test
+```
+
+**What they test:**
+
+1. **Session Discovery** - `GET /.well-known/jmap` returns valid session with:
+   - `urn:ietf:params:jmap:core` capability with all RFC 8620 required fields
+   - At least one account
+   - Required fields: capabilities, accounts, primaryAccounts, apiUrl, state
+
+2. **jmapc Session Parsing** - Validates that an independent JMAP client can parse our session response
+
+3. **Email/query** - Basic method call to the JMAP API endpoint
+
+**Dependencies:** Python 3 with `jmapc` and `requests` (auto-installed via `scripts/.venv/`)
+
+**Authentication:** Uses Cognito credentials from `test-user.yaml` to obtain a JWT token
 
 ## Infrastructure as Code (Terraform)
 

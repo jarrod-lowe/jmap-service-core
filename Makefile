@@ -1,4 +1,4 @@
-.PHONY: help deps build build-all package package-all test integration-test lint init plan show-plan apply plan-destroy destroy clean clean-all fmt validate outputs restore-tfvars help-tfvars
+.PHONY: help deps build build-all package package-all test integration-test jmap-client-test lint init plan show-plan apply plan-destroy destroy clean clean-all fmt validate outputs restore-tfvars help-tfvars
 
 # Environment selection (test or prod)
 ENV ?= test
@@ -46,6 +46,7 @@ help:
 	@echo "  make package                 - Create all Lambda deployment packages (zip)"
 	@echo "  make test                    - Run Go unit tests"
 	@echo "  make integration-test ENV=<env> - Run integration tests against deployed env"
+	@echo "  make jmap-client-test ENV=<env> - Run JMAP protocol compliance tests (jmapc)"
 	@echo "  make lint                    - Run golangci-lint (required)"
 	@echo ""
 	@echo "Terraform Commands:"
@@ -122,6 +123,18 @@ test:
 integration-test:
 	@echo "Running integration tests for $(ENV) environment..."
 	@./scripts/integration-test.sh $(ENV)
+
+# Python venv for jmap-client tests
+scripts/.venv: scripts/jmap-client/requirements.txt
+	@echo "Creating Python virtual environment..."
+	python3 -m venv scripts/.venv
+	scripts/.venv/bin/pip install -q -r scripts/jmap-client/requirements.txt
+	@echo "Python venv created at scripts/.venv"
+
+# Run JMAP protocol compliance tests using jmapc
+jmap-client-test: scripts/.venv
+	@echo "Running JMAP protocol compliance tests for $(ENV) environment..."
+	@./scripts/jmap-client-test.sh $(ENV)
 
 # Run linter - MUST be installed
 # PATH includes ~/go/bin for go-installed tools

@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/aws/aws-lambda-go/events"
+	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/jarrod-lowe/jmap-service-core/internal/db"
 	"github.com/jarrod-lowe/jmap-service-core/internal/plugin"
 	"go.opentelemetry.io/otel"
@@ -32,13 +34,52 @@ func (m *mockAccountStore) EnsureAccount(ctx context.Context, userID string) (*d
 	}, nil
 }
 
+// mockPluginQuerier implements plugin.PluginQuerier for testing
+type mockPluginQuerier struct {
+	items []map[string]types.AttributeValue
+}
+
+func (m *mockPluginQuerier) QueryByPK(ctx context.Context, pk string) ([]map[string]types.AttributeValue, error) {
+	return m.items, nil
+}
+
+// createCorePluginItem creates a plugin item with core capability for testing
+func createCorePluginItem() map[string]types.AttributeValue {
+	record := plugin.PluginRecord{
+		PK:       plugin.PluginPrefix,
+		SK:       plugin.PluginPrefix + "core",
+		PluginID: "core",
+		Capabilities: map[string]map[string]any{
+			"urn:ietf:params:jmap:core": {
+				"maxSizeUpload":         float64(50000000),
+				"maxConcurrentUpload":   float64(4),
+				"maxSizeRequest":        float64(10000000),
+				"maxConcurrentRequests": float64(4),
+				"maxCallsInRequest":     float64(16),
+				"maxObjectsInGet":       float64(500),
+				"maxObjectsInSet":       float64(500),
+				"collationAlgorithms":   []string{"i;ascii-casemap"},
+			},
+		},
+		Methods:      map[string]plugin.MethodTarget{},
+		RegisteredAt: "2025-01-17T00:00:00Z",
+		Version:      "1.0.0",
+	}
+	item, _ := attributevalue.MarshalMap(record)
+	return item
+}
+
 func setupTest() {
 	tp := noop.NewTracerProvider()
 	otel.SetTracerProvider(tp)
 	// Use a mock account store for tests
 	accountStore = &mockAccountStore{}
-	// Use an empty plugin registry for tests
+	// Create a registry with core capability loaded
 	pluginRegistry = plugin.NewRegistry()
+	mock := &mockPluginQuerier{
+		items: []map[string]types.AttributeValue{createCorePluginItem()},
+	}
+	_ = pluginRegistry.LoadFromDynamoDB(context.Background(), mock)
 }
 
 func TestHandler_ValidRequest_ReturnsJMAPSession(t *testing.T) {

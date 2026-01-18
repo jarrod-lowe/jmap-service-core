@@ -47,18 +47,6 @@ type JMAPSession struct {
 	State           string             `json:"state"`
 }
 
-// CoreCapability represents the urn:ietf:params:jmap:core capability
-type CoreCapability struct {
-	MaxSizeUpload         int64    `json:"maxSizeUpload"`
-	MaxConcurrentUpload   int      `json:"maxConcurrentUpload"`
-	MaxSizeRequest        int64    `json:"maxSizeRequest"`
-	MaxConcurrentRequests int      `json:"maxConcurrentRequests"`
-	MaxCallsInRequest     int      `json:"maxCallsInRequest"`
-	MaxObjectsInGet       int      `json:"maxObjectsInGet"`
-	MaxObjectsInSet       int      `json:"maxObjectsInSet"`
-	CollationAlgorithms   []string `json:"collationAlgorithms"`
-}
-
 // Account represents a JMAP account
 type Account struct {
 	Name                string            `json:"name"`
@@ -73,8 +61,6 @@ type Response struct {
 	Headers    map[string]string `json:"headers"`
 	Body       string            `json:"body"`
 }
-
-const coreCapability = "urn:ietf:params:jmap:core"
 
 // Config holds application configuration
 type Config struct {
@@ -186,31 +172,11 @@ func extractSubClaim(request events.APIGatewayProxyRequest) (string, error) {
 func buildSession(userID string, cfg Config, registry *plugin.Registry) JMAPSession {
 	baseURL := fmt.Sprintf("https://%s/v1", cfg.APIDomain)
 
-	// Build capabilities map starting with core
-	capabilities := map[string]any{
-		coreCapability: CoreCapability{
-			MaxSizeUpload:         50000000,
-			MaxConcurrentUpload:   4,
-			MaxSizeRequest:        10000000,
-			MaxConcurrentRequests: 4,
-			MaxCallsInRequest:     16,
-			MaxObjectsInGet:       500,
-			MaxObjectsInSet:       500,
-			CollationAlgorithms:   []string{"i;ascii-casemap"},
-		},
-	}
+	// Build capabilities, accounts, and primaryAccounts from registry
+	capabilities := make(map[string]any)
+	accountCapabilities := make(map[string]any)
+	primaryAccounts := make(map[string]string)
 
-	// Build account capabilities starting with core
-	accountCapabilities := map[string]any{
-		coreCapability: map[string]any{},
-	}
-
-	// Build primary accounts starting with core
-	primaryAccounts := map[string]string{
-		coreCapability: userID,
-	}
-
-	// Add plugin capabilities if registry is available
 	if registry != nil {
 		for _, cap := range registry.GetCapabilities() {
 			capConfig := registry.GetCapabilityConfig(cap)
