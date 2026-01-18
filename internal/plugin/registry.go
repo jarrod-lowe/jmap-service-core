@@ -11,6 +11,9 @@ import (
 // PluginPrefix is the partition key prefix for plugin records
 const PluginPrefix = "PLUGIN#"
 
+// CoreCapability is the URN for the core JMAP capability
+const CoreCapability = "urn:ietf:params:jmap:core"
+
 // PluginQuerier defines the interface for querying plugins from storage
 type PluginQuerier interface {
 	QueryByPK(ctx context.Context, pk string) ([]map[string]types.AttributeValue, error)
@@ -24,11 +27,13 @@ type Registry struct {
 	plugins          []PluginRecord
 }
 
-// NewRegistry creates an empty registry
+// NewRegistry creates a registry with built-in core capability
 func NewRegistry() *Registry {
 	return &Registry{
-		methodMap:        make(map[string]MethodTarget),
-		capabilitySet:    make(map[string]bool),
+		methodMap: make(map[string]MethodTarget),
+		capabilitySet: map[string]bool{
+			CoreCapability: true, // Core is always available
+		},
 		capabilityConfig: make(map[string]map[string]any),
 		plugins:          []PluginRecord{},
 	}

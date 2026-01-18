@@ -60,13 +60,14 @@ resource "aws_iam_role_policy" "get_jmap_session_cloudwatch_metrics" {
   policy = data.aws_iam_policy_document.cloudwatch_metrics.json
 }
 
-# IAM policy for DynamoDB access
+# IAM policy for DynamoDB access (Query for plugins + account operations)
 data "aws_iam_policy_document" "get_jmap_session_dynamodb" {
   statement {
     effect = "Allow"
     actions = [
       "dynamodb:GetItem",
-      "dynamodb:UpdateItem"
+      "dynamodb:UpdateItem",
+      "dynamodb:Query"
     ]
     resources = [aws_dynamodb_table.jmap_data.arn]
   }

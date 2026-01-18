@@ -1,4 +1,4 @@
-.PHONY: help deps build build-all package package-all test lint init plan show-plan apply plan-destroy destroy clean clean-all fmt validate outputs restore-tfvars help-tfvars
+.PHONY: help deps build build-all package package-all test integration-test lint init plan show-plan apply plan-destroy destroy clean clean-all fmt validate outputs restore-tfvars help-tfvars
 
 # Environment selection (test or prod)
 ENV ?= test
@@ -45,6 +45,7 @@ help:
 	@echo "  make build                   - Compile all Go lambdas (linux/arm64)"
 	@echo "  make package                 - Create all Lambda deployment packages (zip)"
 	@echo "  make test                    - Run Go unit tests"
+	@echo "  make integration-test ENV=<env> - Run integration tests against deployed env"
 	@echo "  make lint                    - Run golangci-lint (required)"
 	@echo ""
 	@echo "Terraform Commands:"
@@ -116,6 +117,11 @@ package: package-all
 test:
 	@echo "Running Go tests..."
 	go test -v ./...
+
+# Run integration tests against deployed environment
+integration-test:
+	@echo "Running integration tests for $(ENV) environment..."
+	@./scripts/integration-test.sh $(ENV)
 
 # Run linter - MUST be installed
 # PATH includes ~/go/bin for go-installed tools
