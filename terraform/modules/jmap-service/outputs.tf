@@ -90,3 +90,9 @@ output "jmap_session_endpoint" {
   description = "JMAP session discovery endpoint"
   value       = "https://${var.domain_name}/.well-known/jmap"
 }
+
+# JMAP host for client configuration
+output "jmap_host" {
+  description = "JMAP hostname for client configuration"
+  value       = var.domain_name
+}

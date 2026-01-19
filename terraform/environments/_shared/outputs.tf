@@ -84,3 +84,9 @@ output "jmap_session_endpoint" {
   description = "JMAP session discovery endpoint"
   value       = module.jmap_service.jmap_session_endpoint
 }
+
+# JMAP host for client configuration
+output "jmap_host" {
+  description = "JMAP hostname for client configuration"
+  value       = module.jmap_service.jmap_host
+}

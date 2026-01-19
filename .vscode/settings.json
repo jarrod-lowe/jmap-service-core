@@ -21,6 +21,7 @@
         "otlptrace",
         "otlptracegrpc",
         "plugincontract",
+        "pycache",
         "RCPT",
         "resp",
         "semconv",

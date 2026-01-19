@@ -14,6 +14,7 @@ terraform/environments/*/terraform.tfvars
 
 # Python venv
 scripts/.venv/
+__pycache__/
 
 # IDE
 .vscode/

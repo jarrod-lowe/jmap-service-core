@@ -107,17 +107,17 @@ load_config() {
     # Get terraform outputs
     USER_POOL_ID=$(tf_output "cognito_user_pool_id")
     CLIENT_ID=$(tf_output "cognito_client_id")
-    API_URL=$(tf_output "api_gateway_invoke_url")
+    JMAP_HOST=$(tf_output "jmap_host")
 
-    # Extract region from API URL or use default
-    REGION=$(echo "$API_URL" | sed -n 's/.*execute-api\.\([^.]*\)\.amazonaws\.com.*/\1/p')
+    # Extract region from Cognito User Pool ID (format: region_xxxxxx)
+    REGION=$(echo "$USER_POOL_ID" | cut -d'_' -f1)
     if [[ -z "$REGION" ]]; then
         REGION="ap-southeast-2"
     fi
 
     echo "  Environment: $ENV"
     echo "  Region: $REGION"
-    echo "  API URL: $API_URL"
+    echo "  JMAP Host: $JMAP_HOST"
     echo "  User: $USERNAME"
 }
 
@@ -158,7 +158,7 @@ run_python_test() {
     echo ""
 
     # Export environment variables for the Python script
-    export JMAP_API_URL="$API_URL"
+    export JMAP_HOST="$JMAP_HOST"
     export JMAP_API_TOKEN="$TOKEN"
 
     # Run the Python test script

@@ -6,7 +6,7 @@ Uses the independent jmapc Python JMAP client to validate that our server
 implementation is compliant with RFC 8620 (JMAP Core).
 
 Environment variables:
-    JMAP_API_URL: Base URL of the JMAP API (e.g., https://xxx.execute-api.region.amazonaws.com/test)
+    JMAP_HOST: JMAP hostname (e.g., jmap.example.com)
     JMAP_API_TOKEN: Bearer token for authentication
 
 Exit codes:
@@ -14,16 +14,12 @@ Exit codes:
     1: One or more tests failed
 """
 
-import json
 import os
-import re
 import sys
-from typing import Any
-from urllib.parse import urljoin
 
 import requests
 from jmapc import Client
-from jmapc.session import Session
+from jmapc.methods import CoreEcho, EmailQuery
 
 
 class Colors:
@@ -66,413 +62,204 @@ class TestResult:
         return self.failed == 0
 
 
-def camel_to_snake(name: str) -> str:
-    """Convert camelCase to snake_case."""
-    # Insert underscore before uppercase letters and convert to lowercase
-    s1 = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", name)
-    return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s1).lower()
-
-
-def convert_keys_to_snake_case(data: Any) -> Any:
-    """
-    Recursively convert all dict keys from camelCase to snake_case.
-
-    jmapc's Session.from_dict expects snake_case keys internally,
-    but RFC 8620 specifies camelCase in the JSON wire format.
-    """
-    if isinstance(data, dict):
-        return {camel_to_snake(k): convert_keys_to_snake_case(v) for k, v in data.items()}
-    elif isinstance(data, list):
-        return [convert_keys_to_snake_case(item) for item in data]
-    else:
-        return data
-
-
 def get_config() -> tuple[str, str]:
     """Get configuration from environment variables."""
-    api_url = os.environ.get("JMAP_API_URL")
+    host = os.environ.get("JMAP_HOST")
     token = os.environ.get("JMAP_API_TOKEN")
 
-    if not api_url:
-        print(f"{Colors.RED}ERROR: JMAP_API_URL environment variable not set{Colors.NC}")
+    if not host:
+        print(f"{Colors.RED}ERROR: JMAP_HOST environment variable not set{Colors.NC}")
         sys.exit(1)
 
     if not token:
         print(f"{Colors.RED}ERROR: JMAP_API_TOKEN environment variable not set{Colors.NC}")
         sys.exit(1)
 
-    return api_url, token
+    return host, token
 
 
-def test_session_discovery(api_url: str, token: str, results: TestResult) -> dict | None:
+def test_client_connection(host: str, token: str, results: TestResult) -> Client | None:
     """
-    Test 1: Session Discovery
+    Test 1: Session Discovery via jmapc Client
 
-    Fetch /.well-known/jmap and validate RFC 8620 required fields.
+    Create a jmapc Client and let it automatically discover and parse the session.
+    This validates that our server's session response is compatible with an
+    independent JMAP client implementation.
     """
     print()
-    print("Testing Session Discovery (GET /.well-known/jmap)...")
-
-    session_url = urljoin(api_url.rstrip("/") + "/", ".well-known/jmap")
-    headers = {"Authorization": f"Bearer {token}"}
+    print("Testing Session Discovery (jmapc Client)...")
 
     try:
-        response = requests.get(session_url, headers=headers, timeout=30)
-    except requests.RequestException as e:
-        results.record_fail("Session Discovery request", str(e))
+        client = Client.create_with_api_token(host=host, api_token=token)
+        session = client.jmap_session  # This triggers session fetch
+        results.record_pass("Client connection successful", f"API URL: {session.api_url}")
+    except Exception as e:
+        results.record_fail("Client connection", str(e))
         return None
 
-    # Test: HTTP 200 response
-    if response.status_code == 200:
-        results.record_pass("Session Discovery returns 200")
-    else:
-        results.record_fail(
-            "Session Discovery returns 200", f"Got HTTP {response.status_code}"
-        )
-        return None
-
-    # Parse JSON
+    # Validate session properties are accessible
+    # jmapc parses capabilities into structured objects
     try:
-        session_data = response.json()
-    except json.JSONDecodeError as e:
-        results.record_fail("Session Discovery returns valid JSON", str(e))
-        return None
-
-    results.record_pass("Session Discovery returns valid JSON")
-
-    # Test: capabilities field exists and contains urn:ietf:params:jmap:core
-    if "capabilities" in session_data and isinstance(session_data["capabilities"], dict):
-        if "urn:ietf:params:jmap:core" in session_data["capabilities"]:
-            results.record_pass("Session has urn:ietf:params:jmap:core capability")
+        if session.capabilities and session.capabilities.core:
+            core = session.capabilities.core
+            results.record_pass(
+                "Session has urn:ietf:params:jmap:core capability",
+                f"maxSizeUpload: {core.max_size_upload}",
+            )
         else:
             results.record_fail(
                 "Session has urn:ietf:params:jmap:core capability",
-                f"capabilities: {list(session_data['capabilities'].keys())}",
+                "capabilities.core is None",
             )
-    else:
-        results.record_fail(
-            "Session has capabilities dict", f"Got: {type(session_data.get('capabilities'))}"
-        )
+    except Exception as e:
+        results.record_fail("Session capabilities accessible", str(e))
 
-    # Test: accounts field exists and has at least one account
-    if "accounts" in session_data and isinstance(session_data["accounts"], dict):
-        if len(session_data["accounts"]) > 0:
-            account_ids = list(session_data["accounts"].keys())
-            results.record_pass(
-                "Session has at least one account", f"Account IDs: {account_ids}"
-            )
+    # jmapc stores account IDs in primary_accounts
+    try:
+        account_id = client.account_id
+        if account_id:
+            results.record_pass("Session has at least one account", f"Account ID: {account_id}")
         else:
-            results.record_fail("Session has at least one account", "accounts dict is empty")
-    else:
-        results.record_fail(
-            "Session has accounts dict", f"Got: {type(session_data.get('accounts'))}"
-        )
-
-    # Test: primaryAccounts field exists
-    if "primaryAccounts" in session_data and isinstance(
-        session_data["primaryAccounts"], dict
-    ):
-        results.record_pass("Session has primaryAccounts")
-    else:
-        results.record_fail(
-            "Session has primaryAccounts",
-            f"Got: {type(session_data.get('primaryAccounts'))}",
-        )
-
-    # Test: apiUrl field exists and is a string
-    if "apiUrl" in session_data and isinstance(session_data["apiUrl"], str):
-        results.record_pass("Session has apiUrl", session_data["apiUrl"])
-    else:
-        results.record_fail(
-            "Session has apiUrl string", f"Got: {session_data.get('apiUrl')}"
-        )
-
-    # Test: state field exists and is a string
-    if "state" in session_data and isinstance(session_data["state"], str):
-        results.record_pass("Session has state")
-    else:
-        results.record_fail(
-            "Session has state string", f"Got: {type(session_data.get('state'))}"
-        )
-
-    return session_data
-
-
-def test_jmapc_session_parsing(session_data: dict, results: TestResult) -> Session | None:
-    """
-    Test 2: jmapc Session Parsing
-
-    Use the jmapc library to parse the session data. This validates that
-    our session format is compatible with an independent JMAP client.
-
-    Note: jmapc's Session.from_dict expects snake_case keys internally,
-    but RFC 8620 specifies camelCase in the JSON wire format. We convert
-    the keys before passing to jmapc to test compatibility.
-    """
-    print()
-    print("Testing jmapc Session Parsing...")
+            results.record_fail("Session has at least one account", "No account ID found")
+    except Exception as e:
+        results.record_fail("Session accounts accessible", str(e))
 
     try:
-        # Convert camelCase keys to snake_case for jmapc's internal format
-        snake_case_data = convert_keys_to_snake_case(session_data)
-
-        session = Session.from_dict(snake_case_data)
-        results.record_pass("jmapc parses session successfully")
-        return session
+        if session.primary_accounts:
+            results.record_pass(
+                "Session has primary_accounts",
+                f"core={session.primary_accounts.core}, mail={session.primary_accounts.mail}",
+            )
+        else:
+            results.record_fail(
+                "Session has primary_accounts", "primary_accounts is None"
+            )
     except Exception as e:
-        results.record_fail("jmapc parses session successfully", str(e))
-        return None
+        results.record_fail("Session primary_accounts accessible", str(e))
+
+    try:
+        if session.api_url:
+            results.record_pass("Session has api_url", session.api_url)
+        else:
+            results.record_fail("Session has api_url", "api_url is None or empty")
+    except Exception as e:
+        results.record_fail("Session api_url accessible", str(e))
+
+    try:
+        if session.state:
+            results.record_pass("Session has state")
+        else:
+            results.record_fail("Session has state", "state is None or empty")
+    except Exception as e:
+        results.record_fail("Session state accessible", str(e))
+
+    return client
 
 
-def test_email_query(api_url: str, token: str, session_data: dict, results: TestResult):
+def test_core_echo(client: Client, results: TestResult):
+    """
+    Test 2: Core/echo Method Call
+
+    Per RFC 8620 Section 3.5, Core/echo echoes back its arguments unchanged.
+    Uses jmapc's CoreEcho method to test authenticated connection to the JMAP API.
+    """
+    print()
+    print("Testing Core/echo (via jmapc)...")
+
+    test_data = {"hello": True, "count": 42, "nested": {"key": "value", "array": [1, 2, 3]}}
+
+    try:
+        response = client.request(CoreEcho(data=test_data))
+        results.record_pass("Core/echo request successful")
+
+        # Check the response data matches
+        response_data = getattr(response, "data", None)
+        if response_data == test_data:
+            results.record_pass("Core/echo echoed arguments exactly")
+        else:
+            actual_data = getattr(response, "data", response)
+            results.record_fail(
+                "Core/echo echoed arguments exactly",
+                f"Expected: {test_data}\nGot: {actual_data}",
+            )
+    except Exception as e:
+        results.record_fail("Core/echo request", str(e))
+
+
+def test_email_query(client: Client, results: TestResult):
     """
     Test 3: Email/query Method Call
 
-    Make a basic Email/query request to the apiUrl and validate the response structure.
+    Make a basic Email/query request using jmapc to validate mail method handling.
+    Note: jmapc Client automatically uses client.account_id for all requests.
     """
     print()
-    print("Testing Email/query (POST to apiUrl)...")
-
-    # Get apiUrl and first account ID
-    api_endpoint = session_data.get("apiUrl")
-    if not api_endpoint:
-        results.record_fail("Email/query request", "No apiUrl in session")
-        return
-
-    accounts = session_data.get("accounts", {})
-    if not accounts:
-        results.record_fail("Email/query request", "No accounts in session")
-        return
-
-    account_id = list(accounts.keys())[0]
-
-    # Build JMAP request
-    jmap_request = {
-        "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
-        "methodCalls": [["Email/query", {"accountId": account_id}, "call1"]],
-    }
-
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
+    print("Testing Email/query (via jmapc)...")
 
     try:
-        response = requests.post(
-            api_endpoint, headers=headers, json=jmap_request, timeout=30
-        )
-    except requests.RequestException as e:
-        results.record_fail("Email/query request", str(e))
-        return
+        response = client.request(EmailQuery())
+        results.record_pass("Email/query request successful")
 
-    # Test: HTTP 200 response
-    if response.status_code == 200:
-        results.record_pass("Email/query returns 200")
-    else:
-        results.record_fail(
-            "Email/query returns 200", f"Got HTTP {response.status_code}"
-        )
-        return
-
-    # Parse JSON response
-    try:
-        response_data = response.json()
-    except json.JSONDecodeError as e:
-        results.record_fail("Email/query returns valid JSON", str(e))
-        return
-
-    results.record_pass("Email/query returns valid JSON")
-
-    # Validate JMAP response structure
-    # Must have methodResponses array
-    if "methodResponses" in response_data and isinstance(
-        response_data["methodResponses"], list
-    ):
-        results.record_pass("Response has methodResponses array")
-    else:
-        results.record_fail(
-            "Response has methodResponses array",
-            f"Got: {type(response_data.get('methodResponses'))}",
-        )
-        return
-
-    # Check the first method response
-    if len(response_data["methodResponses"]) > 0:
-        method_response = response_data["methodResponses"][0]
-        if isinstance(method_response, list) and len(method_response) >= 3:
-            method_name = method_response[0]
-            method_args = method_response[1]
-            call_id = method_response[2]
-
-            # Response call_id should match request call_id
-            if call_id == "call1":
-                results.record_pass("Response call_id matches request")
-            else:
-                results.record_fail(
-                    "Response call_id matches request",
-                    f"Expected 'call1', got '{call_id}'",
-                )
-
-            # Method name should be Email/query or error
-            if method_name in ["Email/query", "error"]:
-                results.record_pass(
-                    f"Response method is '{method_name}'",
-                    f"Args: {json.dumps(method_args)[:100]}...",
-                )
-            else:
-                results.record_fail(
-                    "Response method is Email/query or error",
-                    f"Got: {method_name}",
-                )
-        else:
-            results.record_fail(
-                "Method response is [name, args, callId] tuple",
-                f"Got: {method_response}",
+        # Check if response is an error (server may not have Email implemented)
+        error_type = getattr(response, "type", None)
+        error_desc = getattr(response, "description", None)
+        if error_type and error_desc:
+            # This is a JMAP error response
+            results.record_pass(
+                "Email/query returned JMAP error",
+                f"type={error_type}, description={error_desc}",
             )
-    else:
-        results.record_fail("methodResponses has at least one response", "Array is empty")
+        else:
+            # Check the response has expected fields for successful query
+            ids = getattr(response, "ids", None)
+            if ids is not None:
+                results.record_pass(
+                    "Email/query response has ids", f"Count: {len(ids)}"
+                )
+            else:
+                results.record_fail(
+                    "Email/query response has ids", "No ids field in response"
+                )
+
+            if hasattr(response, "query_state"):
+                results.record_pass("Email/query response has query_state")
+            else:
+                results.record_fail(
+                    "Email/query response has query_state", "No query_state field"
+                )
+
+    except Exception as e:
+        results.record_fail("Email/query request", str(e))
 
 
-def test_core_echo(api_url: str, token: str, session_data: dict, results: TestResult):
+def test_blob_upload(client: Client, token: str, results: TestResult):
     """
-    Test 4: Core/echo Method Call
-
-    Per RFC 8620 Section 3.5, Core/echo echoes back its arguments unchanged.
-    This tests authenticated connection to the JMAP API.
-    """
-    print()
-    print("Testing Core/echo (POST to apiUrl)...")
-
-    # Get apiUrl
-    api_endpoint = session_data.get("apiUrl")
-    if not api_endpoint:
-        results.record_fail("Core/echo request", "No apiUrl in session")
-        return
-
-    # Build JMAP request with test arguments
-    test_args = {
-        "hello": True,
-        "count": 42,
-        "nested": {"key": "value", "array": [1, 2, 3]},
-    }
-
-    jmap_request = {
-        "using": ["urn:ietf:params:jmap:core"],
-        "methodCalls": [["Core/echo", test_args, "echo1"]],
-    }
-
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-
-    try:
-        response = requests.post(
-            api_endpoint, headers=headers, json=jmap_request, timeout=30
-        )
-    except requests.RequestException as e:
-        results.record_fail("Core/echo request", str(e))
-        return
-
-    # Test: HTTP 200 response
-    if response.status_code == 200:
-        results.record_pass("Core/echo returns 200")
-    else:
-        results.record_fail(
-            "Core/echo returns 200", f"Got HTTP {response.status_code}: {response.text}"
-        )
-        return
-
-    # Parse JSON response
-    try:
-        response_data = response.json()
-    except json.JSONDecodeError as e:
-        results.record_fail("Core/echo returns valid JSON", str(e))
-        return
-
-    results.record_pass("Core/echo returns valid JSON")
-
-    # Validate JMAP response structure
-    if "methodResponses" not in response_data or not isinstance(
-        response_data["methodResponses"], list
-    ):
-        results.record_fail(
-            "Response has methodResponses array",
-            f"Got: {type(response_data.get('methodResponses'))}",
-        )
-        return
-
-    if len(response_data["methodResponses"]) == 0:
-        results.record_fail("methodResponses has at least one response", "Array is empty")
-        return
-
-    method_response = response_data["methodResponses"][0]
-    if not isinstance(method_response, list) or len(method_response) < 3:
-        results.record_fail(
-            "Method response is [name, args, callId] tuple",
-            f"Got: {method_response}",
-        )
-        return
-
-    method_name = method_response[0]
-    method_args = method_response[1]
-    call_id = method_response[2]
-
-    # Test: Response call_id should match request call_id
-    if call_id == "echo1":
-        results.record_pass("Core/echo response call_id matches request")
-    else:
-        results.record_fail(
-            "Core/echo response call_id matches request",
-            f"Expected 'echo1', got '{call_id}'",
-        )
-
-    # Test: Method name should be Core/echo
-    if method_name == "Core/echo":
-        results.record_pass("Response method is 'Core/echo'")
-    else:
-        results.record_fail(
-            "Response method is 'Core/echo'",
-            f"Got: {method_name}",
-        )
-        return
-
-    # Test: Arguments should be echoed back exactly
-    if method_args == test_args:
-        results.record_pass("Core/echo echoed arguments exactly")
-    else:
-        results.record_fail(
-            "Core/echo echoed arguments exactly",
-            f"Expected: {test_args}\nGot: {method_args}",
-        )
-
-
-def test_blob_upload(api_url: str, token: str, session_data: dict, results: TestResult):
-    """
-    Test 5: Blob Upload (RFC 8620 Section 6.1)
+    Test 4: Blob Upload (RFC 8620 Section 6.1)
 
     Validate session has uploadUrl and blob upload returns compliant response.
+    Note: jmapc doesn't support raw blob upload, so we use raw HTTP requests.
     """
     print()
-    print("Testing Blob Upload (POST to uploadUrl)...")
+    print("Testing Blob Upload (raw HTTP - jmapc doesn't support this)...")
 
-    # Test: Session has uploadUrl (RFC 8620 Section 2 requirement)
-    upload_url = session_data.get("uploadUrl")
-    if not upload_url:
-        results.record_fail("Session has uploadUrl", "uploadUrl not in session")
+    session = client.jmap_session
+
+    # Test: Session has upload_url (RFC 8620 Section 2 requirement)
+    if not session.upload_url:
+        results.record_fail("Session has upload_url", "upload_url not in session")
         return
 
-    results.record_pass("Session has uploadUrl", upload_url)
+    results.record_pass("Session has upload_url", session.upload_url)
 
     # Get account ID
-    accounts = session_data.get("accounts", {})
-    if not accounts:
-        results.record_fail("Blob upload request", "No accounts in session")
+    try:
+        account_id = client.account_id
+    except Exception as e:
+        results.record_fail("Blob upload request", f"No account ID: {e}")
         return
-    account_id = list(accounts.keys())[0]
 
-    # Replace {accountId} placeholder in uploadUrl
-    upload_endpoint = upload_url.replace("{accountId}", account_id)
+    # Replace {accountId} placeholder in upload_url
+    upload_endpoint = session.upload_url.replace("{accountId}", account_id)
 
     # Upload test blob
     test_content = b"Test blob content for RFC 8620 compliance"
@@ -501,7 +288,7 @@ def test_blob_upload(api_url: str, token: str, session_data: dict, results: Test
     # Parse JSON response
     try:
         response_data = response.json()
-    except json.JSONDecodeError as e:
+    except Exception as e:
         results.record_fail("Blob upload returns valid JSON", str(e))
         return
 
@@ -519,22 +306,28 @@ def test_blob_upload(api_url: str, token: str, session_data: dict, results: Test
     if response_data.get("accountId") == account_id:
         results.record_pass("Response accountId matches request")
     else:
-        results.record_fail("Response accountId matches request",
-            f"Expected '{account_id}', got '{response_data.get('accountId')}'")
+        results.record_fail(
+            "Response accountId matches request",
+            f"Expected '{account_id}', got '{response_data.get('accountId')}'",
+        )
 
     # Test: size matches content length
     if response_data.get("size") == len(test_content):
         results.record_pass("Response size matches content length")
     else:
-        results.record_fail("Response size matches content length",
-            f"Expected {len(test_content)}, got {response_data.get('size')}")
+        results.record_fail(
+            "Response size matches content length",
+            f"Expected {len(test_content)}, got {response_data.get('size')}",
+        )
 
     # Test: type matches Content-Type
     if response_data.get("type") == "application/octet-stream":
         results.record_pass("Response type matches Content-Type")
     else:
-        results.record_fail("Response type matches Content-Type",
-            f"Expected 'application/octet-stream', got '{response_data.get('type')}'")
+        results.record_fail(
+            "Response type matches Content-Type",
+            f"Expected 'application/octet-stream', got '{response_data.get('type')}'",
+        )
 
 
 def print_summary(results: TestResult):
@@ -563,24 +356,21 @@ def main():
     print("JMAP Protocol Compliance Tests (jmapc)")
     print("=" * 40)
 
-    api_url, token = get_config()
+    host, token = get_config()
     results = TestResult()
 
-    # Test 1: Session Discovery
-    session_data = test_session_discovery(api_url, token, results)
+    # Test 1: Session Discovery via jmapc Client
+    client = test_client_connection(host, token, results)
 
-    if session_data:
-        # Test 2: jmapc Session Parsing
-        test_jmapc_session_parsing(session_data, results)
+    if client:
+        # Test 2: Core/echo
+        test_core_echo(client, results)
 
         # Test 3: Email/query
-        test_email_query(api_url, token, session_data, results)
+        test_email_query(client, results)
 
-        # Test 4: Core/echo
-        test_core_echo(api_url, token, session_data, results)
-
-        # Test 5: Blob Upload
-        test_blob_upload(api_url, token, session_data, results)
+        # Test 4: Blob Upload
+        test_blob_upload(client, token, results)
 
     # Print summary
     print_summary(results)
