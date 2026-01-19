@@ -15,7 +15,7 @@ Scope deliberately excludes:
 * mailbox CRUD
 * full-text search / advanced filters
 * push notifications
-* blob upload/download URLs for third-party clients
+* blob download URLs for third-party clients (upload IS implemented)
 
 The intended first client is *your own* (so we can start with a very small JMAP Mail surface).
 

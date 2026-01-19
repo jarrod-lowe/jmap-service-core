@@ -447,6 +447,96 @@ def test_core_echo(api_url: str, token: str, session_data: dict, results: TestRe
         )
 
 
+def test_blob_upload(api_url: str, token: str, session_data: dict, results: TestResult):
+    """
+    Test 5: Blob Upload (RFC 8620 Section 6.1)
+
+    Validate session has uploadUrl and blob upload returns compliant response.
+    """
+    print()
+    print("Testing Blob Upload (POST to uploadUrl)...")
+
+    # Test: Session has uploadUrl (RFC 8620 Section 2 requirement)
+    upload_url = session_data.get("uploadUrl")
+    if not upload_url:
+        results.record_fail("Session has uploadUrl", "uploadUrl not in session")
+        return
+
+    results.record_pass("Session has uploadUrl", upload_url)
+
+    # Get account ID
+    accounts = session_data.get("accounts", {})
+    if not accounts:
+        results.record_fail("Blob upload request", "No accounts in session")
+        return
+    account_id = list(accounts.keys())[0]
+
+    # Replace {accountId} placeholder in uploadUrl
+    upload_endpoint = upload_url.replace("{accountId}", account_id)
+
+    # Upload test blob
+    test_content = b"Test blob content for RFC 8620 compliance"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/octet-stream",
+    }
+
+    try:
+        response = requests.post(
+            upload_endpoint, headers=headers, data=test_content, timeout=30
+        )
+    except requests.RequestException as e:
+        results.record_fail("Blob upload request", str(e))
+        return
+
+    # Test: HTTP 201 response
+    if response.status_code == 201:
+        results.record_pass("Blob upload returns 201")
+    else:
+        results.record_fail(
+            "Blob upload returns 201", f"Got HTTP {response.status_code}: {response.text}"
+        )
+        return
+
+    # Parse JSON response
+    try:
+        response_data = response.json()
+    except json.JSONDecodeError as e:
+        results.record_fail("Blob upload returns valid JSON", str(e))
+        return
+
+    results.record_pass("Blob upload returns valid JSON")
+
+    # Test: RFC 8620 Section 6.1 required fields
+    required_fields = ["accountId", "blobId", "type", "size"]
+    for field in required_fields:
+        if field in response_data:
+            results.record_pass(f"Response has '{field}'", str(response_data[field]))
+        else:
+            results.record_fail(f"Response has '{field}'", "Field missing")
+
+    # Test: accountId matches
+    if response_data.get("accountId") == account_id:
+        results.record_pass("Response accountId matches request")
+    else:
+        results.record_fail("Response accountId matches request",
+            f"Expected '{account_id}', got '{response_data.get('accountId')}'")
+
+    # Test: size matches content length
+    if response_data.get("size") == len(test_content):
+        results.record_pass("Response size matches content length")
+    else:
+        results.record_fail("Response size matches content length",
+            f"Expected {len(test_content)}, got {response_data.get('size')}")
+
+    # Test: type matches Content-Type
+    if response_data.get("type") == "application/octet-stream":
+        results.record_pass("Response type matches Content-Type")
+    else:
+        results.record_fail("Response type matches Content-Type",
+            f"Expected 'application/octet-stream', got '{response_data.get('type')}'")
+
+
 def print_summary(results: TestResult):
     """Print test summary."""
     print()
@@ -488,6 +578,9 @@ def main():
 
         # Test 4: Core/echo
         test_core_echo(api_url, token, session_data, results)
+
+        # Test 5: Blob Upload
+        test_blob_upload(api_url, token, session_data, results)
 
     # Print summary
     print_summary(results)

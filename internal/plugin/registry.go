@@ -51,9 +51,7 @@ func (r *Registry) LoadFromDynamoDB(ctx context.Context, querier PluginQuerier) 
 		r.plugins = append(r.plugins, record)
 
 		// Index methods
-		for method, target := range record.Methods {
-			r.methodMap[method] = target
-		}
+		maps.Copy(r.methodMap, record.Methods)
 
 		// Index capabilities with merging
 		for capability, config := range record.Capabilities {

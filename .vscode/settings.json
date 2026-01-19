@@ -14,6 +14,7 @@
         "jarrod",
         "jarrodlowe",
         "JMAP",
+        "jmapc",
         "jsonencode",
         "lambdasvc",
         "otellambda",
@@ -26,6 +27,7 @@
         "tfstate",
         "tfvars",
         "tracecontext",
-        "userpool"
+        "userpool",
+        "venv"
     ]
 }

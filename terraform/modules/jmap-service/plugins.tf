@@ -14,7 +14,7 @@ resource "aws_dynamodb_table_item" "core_plugin" {
       M = {
         "urn:ietf:params:jmap:core" = {
           M = {
-            maxSizeUpload         = { N = "50000000" }
+            maxSizeUpload         = { N = "10000000" }
             maxConcurrentUpload   = { N = "4" }
             maxSizeRequest        = { N = "10000000" }
             maxConcurrentRequests = { N = "4" }

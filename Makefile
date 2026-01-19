@@ -1,4 +1,4 @@
-.PHONY: help deps build build-all package package-all test integration-test jmap-client-test lint init plan show-plan apply plan-destroy destroy clean clean-all fmt validate outputs restore-tfvars help-tfvars
+.PHONY: help deps build build-all package package-all test integration-test jmap-client-test lint init plan show-plan apply plan-destroy destroy clean clean-all fmt validate outputs restore-tfvars help-tfvars invalidate-cache
 
 # Environment selection (test or prod)
 ENV ?= test
@@ -9,7 +9,7 @@ $(error ENV must be 'test' or 'prod'. Usage: make <target> ENV=test)
 endif
 
 # Lambda definitions - add new lambdas here
-LAMBDAS = get-jmap-session jmap-api core-echo
+LAMBDAS = get-jmap-session jmap-api core-echo blob-upload
 
 # Directories
 BUILD_DIR = build
@@ -268,3 +268,18 @@ restore-tfvars:
 		echo "  Either the file doesn't exist yet, or you need to run 'make init apply' first"; \
 		exit 1; \
 	fi
+
+# Invalidate CloudFront cache
+invalidate-cache: $(ENV_DIR)/.terraform
+	@echo "Invalidating CloudFront cache for $(ENV) environment..."
+	@DISTRIBUTION_ID=$$(cd $(ENV_DIR) && terraform output -raw cloudfront_distribution_id 2>/dev/null); \
+	if [ -z "$$DISTRIBUTION_ID" ]; then \
+		echo "✗ Could not get CloudFront distribution ID"; \
+		exit 1; \
+	fi; \
+	echo "Distribution ID: $$DISTRIBUTION_ID"; \
+	AWS_PROFILE=ses-mail aws cloudfront create-invalidation \
+		--distribution-id "$$DISTRIBUTION_ID" \
+		--paths "/*" \
+		--output text; \
+	echo "✓ Cache invalidation initiated"

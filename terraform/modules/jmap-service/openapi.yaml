@@ -153,3 +153,113 @@ paths:
         httpMethod: POST
         uri: "arn:aws:apigateway:${aws_region}:lambda:path/2015-03-31/functions/${jmap_api_lambda_arn}/invocations"
         passthroughBehavior: when_no_match
+  /upload/{accountId}:
+    post:
+      summary: "Blob Upload (Cognito Auth)"
+      description: "RFC 8620 blob upload endpoint for user clients"
+      operationId: "postUpload"
+      security:
+        - CognitoAuthorizer: []
+      parameters:
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "Target account ID for the blob upload"
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+          message/rfc822:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "201":
+          description: "Blob uploaded successfully"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accountId:
+                    type: string
+                  blobId:
+                    type: string
+                  type:
+                    type: string
+                  size:
+                    type: integer
+        "400":
+          description: "Bad request (missing Content-Type)"
+        "401":
+          description: "Unauthorized"
+        "413":
+          description: "Payload too large"
+        "500":
+          description: "Server error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "arn:aws:apigateway:${aws_region}:lambda:path/2015-03-31/functions/${blob_upload_lambda_arn}/invocations"
+        passthroughBehavior: when_no_match
+        contentHandling: CONVERT_TO_TEXT
+  /upload-iam/{accountId}:
+    post:
+      summary: "Blob Upload (IAM Auth)"
+      description: "RFC 8620 blob upload endpoint for machine clients with IAM authentication"
+      operationId: "postUploadIam"
+      security:
+        - IamAuthorizer: []
+      parameters:
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "Target account ID for the blob upload"
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+          message/rfc822:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "201":
+          description: "Blob uploaded successfully"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accountId:
+                    type: string
+                  blobId:
+                    type: string
+                  type:
+                    type: string
+                  size:
+                    type: integer
+        "400":
+          description: "Bad request (missing Content-Type)"
+        "403":
+          description: "Forbidden"
+        "413":
+          description: "Payload too large"
+        "500":
+          description: "Server error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "arn:aws:apigateway:${aws_region}:lambda:path/2015-03-31/functions/${blob_upload_lambda_arn}/invocations"
+        passthroughBehavior: when_no_match
+        contentHandling: CONVERT_TO_TEXT

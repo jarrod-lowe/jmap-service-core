@@ -6,6 +6,7 @@ locals {
     aws_region                  = var.aws_region
     get_jmap_session_lambda_arn = aws_lambda_function.get_jmap_session.arn
     jmap_api_lambda_arn         = aws_lambda_function.jmap_api.arn
+    blob_upload_lambda_arn      = aws_lambda_function.blob_upload.arn
   })
 }
 
@@ -14,6 +15,14 @@ resource "aws_api_gateway_rest_api" "api" {
   description = "JMAP Service API"
 
   body = local.openapi_body
+
+  # Explicitly set binary media types to only blob upload content types.
+  # This prevents */* from being added which would base64-encode all bodies
+  # including application/json requests to the JMAP API.
+  binary_media_types = [
+    "application/octet-stream",
+    "message/rfc822",
+  ]
 
   endpoint_configuration {
     types = ["REGIONAL"]
@@ -24,7 +33,12 @@ resource "aws_api_gateway_deployment" "api" {
   rest_api_id = aws_api_gateway_rest_api.api.id
 
   triggers = {
-    redeployment = sha1(local.openapi_body)
+    # Include both openapi body and binary media types to ensure redeployment
+    # when either changes
+    redeployment = sha1(jsonencode({
+      body               = local.openapi_body
+      binary_media_types = aws_api_gateway_rest_api.api.binary_media_types
+    }))
   }
 
   lifecycle {
