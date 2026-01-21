@@ -90,3 +90,14 @@ output "jmap_host" {
   description = "JMAP hostname for client configuration"
   value       = module.jmap_service.jmap_host
 }
+
+# Blob download infrastructure outputs
+output "cloudfront_private_key_secret_arn" {
+  description = "ARN of the Secrets Manager secret for CloudFront private key"
+  value       = module.jmap_service.cloudfront_private_key_secret_arn
+}
+
+output "cloudfront_key_pair_id" {
+  description = "CloudFront key pair ID for signed URL generation"
+  value       = module.jmap_service.cloudfront_key_pair_id
+}

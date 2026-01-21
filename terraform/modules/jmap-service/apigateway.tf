@@ -7,6 +7,7 @@ locals {
     get_jmap_session_lambda_arn = aws_lambda_function.get_jmap_session.arn
     jmap_api_lambda_arn         = aws_lambda_function.jmap_api.arn
     blob_upload_lambda_arn      = aws_lambda_function.blob_upload.arn
+    blob_download_lambda_arn    = aws_lambda_function.blob_download.arn
   })
 }
 

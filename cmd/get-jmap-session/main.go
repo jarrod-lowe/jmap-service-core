@@ -202,7 +202,7 @@ func buildSession(userID string, cfg Config, registry *plugin.Registry) JMAPSess
 		PrimaryAccounts: primaryAccounts,
 		Username:        userID,
 		APIUrl:          fmt.Sprintf("%s/jmap", baseURL),
-		DownloadUrl:     fmt.Sprintf("%s/download/{accountId}/{blobId}/{name}", baseURL),
+		DownloadUrl:     fmt.Sprintf("%s/download/{accountId}/{blobId}", baseURL),
 		UploadUrl:       fmt.Sprintf("%s/upload/{accountId}", baseURL),
 		EventSourceUrl:  fmt.Sprintf("%s/events/{types}/{closeafter}/{ping}", baseURL),
 		State:           "0",

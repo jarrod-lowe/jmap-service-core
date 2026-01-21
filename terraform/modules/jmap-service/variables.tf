@@ -63,3 +63,31 @@ variable "oauth_logout_urls" {
   type        = list(string)
   default     = ["http://localhost:3000/logout"]
 }
+
+variable "signed_url_expiry_seconds" {
+  description = "Expiry time in seconds for CloudFront signed URLs"
+  type        = number
+  default     = 300
+
+  validation {
+    condition     = var.signed_url_expiry_seconds >= 60 && var.signed_url_expiry_seconds <= 604800
+    error_message = "Signed URL expiry must be between 60 seconds (1 minute) and 604800 seconds (7 days)"
+  }
+}
+
+variable "cloudfront_signing_key_rotation_phase" {
+  description = "CloudFront signing key rotation phase: 'normal', 'rotating', or 'complete'"
+  type        = string
+  default     = "normal"
+
+  validation {
+    condition     = contains(["normal", "rotating", "complete"], var.cloudfront_signing_key_rotation_phase)
+    error_message = "Must be 'normal', 'rotating', or 'complete'"
+  }
+}
+
+variable "cloudfront_signing_key_max_age_days" {
+  description = "Days before CloudFront signing key age alarm triggers"
+  type        = number
+  default     = 180
+}

@@ -263,3 +263,83 @@ paths:
         uri: "arn:aws:apigateway:${aws_region}:lambda:path/2015-03-31/functions/${blob_upload_lambda_arn}/invocations"
         passthroughBehavior: when_no_match
         contentHandling: CONVERT_TO_TEXT
+  /download/{accountId}/{blobId}:
+    get:
+      summary: "Blob Download (Cognito Auth)"
+      description: "Returns a 302 redirect to a CloudFront signed URL for blob download"
+      operationId: "getDownload"
+      security:
+        - CognitoAuthorizer: []
+      parameters:
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "Account ID that owns the blob"
+        - name: blobId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "ID of the blob to download"
+      responses:
+        "302":
+          description: "Redirect to CloudFront signed URL"
+          headers:
+            Location:
+              schema:
+                type: string
+              description: "CloudFront signed URL for blob download"
+        "401":
+          description: "Unauthorized"
+        "403":
+          description: "Forbidden - account mismatch"
+        "404":
+          description: "Blob not found"
+        "500":
+          description: "Server error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "arn:aws:apigateway:${aws_region}:lambda:path/2015-03-31/functions/${blob_download_lambda_arn}/invocations"
+        passthroughBehavior: when_no_match
+  /download-iam/{accountId}/{blobId}:
+    get:
+      summary: "Blob Download (IAM Auth)"
+      description: "Returns a 302 redirect to a CloudFront signed URL for blob download (IAM authentication)"
+      operationId: "getDownloadIam"
+      security:
+        - IamAuthorizer: []
+      parameters:
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "Account ID that owns the blob"
+        - name: blobId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "ID of the blob to download"
+      responses:
+        "302":
+          description: "Redirect to CloudFront signed URL"
+          headers:
+            Location:
+              schema:
+                type: string
+              description: "CloudFront signed URL for blob download"
+        "403":
+          description: "Forbidden"
+        "404":
+          description: "Blob not found"
+        "500":
+          description: "Server error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "arn:aws:apigateway:${aws_region}:lambda:path/2015-03-31/functions/${blob_download_lambda_arn}/invocations"
+        passthroughBehavior: when_no_match

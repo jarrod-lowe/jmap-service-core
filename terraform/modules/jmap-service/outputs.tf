@@ -96,3 +96,14 @@ output "jmap_host" {
   description = "JMAP hostname for client configuration"
   value       = var.domain_name
 }
+
+# Blob download infrastructure outputs
+output "cloudfront_private_key_secret_arn" {
+  description = "ARN of the Secrets Manager secret for CloudFront private key"
+  value       = aws_secretsmanager_secret.cloudfront_private_key.arn
+}
+
+output "cloudfront_key_pair_id" {
+  description = "CloudFront key pair ID for signed URL generation"
+  value       = aws_cloudfront_public_key.blob_signing_current.id
+}

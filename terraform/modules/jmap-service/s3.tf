@@ -18,6 +18,33 @@ resource "aws_s3_bucket_public_access_block" "blobs" {
   restrict_public_buckets = true
 }
 
+# Bucket policy to allow CloudFront OAC access for blob downloads
+data "aws_iam_policy_document" "blobs_cloudfront_access" {
+  statement {
+    sid    = "AllowCloudFrontServicePrincipal"
+    effect = "Allow"
+
+    principals {
+      type        = "Service"
+      identifiers = ["cloudfront.amazonaws.com"]
+    }
+
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.blobs.arn}/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "AWS:SourceArn"
+      values   = [aws_cloudfront_distribution.api.arn]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "blobs" {
+  bucket = aws_s3_bucket.blobs.id
+  policy = data.aws_iam_policy_document.blobs_cloudfront_access.json
+}
+
 # Server-side encryption with S3 managed keys
 resource "aws_s3_bucket_server_side_encryption_configuration" "blobs" {
   bucket = aws_s3_bucket.blobs.id

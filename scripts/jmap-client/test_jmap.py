@@ -330,6 +330,211 @@ def test_blob_upload(client: Client, token: str, results: TestResult):
         )
 
 
+def test_blob_download(client: Client, token: str, results: TestResult):
+    """
+    Test 5: Blob Download (CloudFront Signed URL Redirect)
+
+    Validates:
+    - Session has downloadUrl
+    - Upload blob, then download via /download/{accountId}/{blobId}
+    - Returns 302 redirect to CloudFront signed URL
+    - Following redirect returns original blob content
+    """
+    print()
+    print("Testing Blob Download (redirect to CloudFront signed URL)...")
+
+    session = client.jmap_session
+
+    # Test: Session has download_url (RFC 8620 Section 2 requirement)
+    if not session.download_url:
+        results.record_fail("Session has download_url", "download_url not in session")
+        return
+
+    results.record_pass("Session has download_url", session.download_url)
+
+    # Get account ID
+    try:
+        account_id = client.account_id
+    except Exception as e:
+        results.record_fail("Blob download request", f"No account ID: {e}")
+        return
+
+    # First, upload a test blob
+    upload_endpoint = session.upload_url.replace("{accountId}", account_id)
+    test_content = b"Test blob content for download verification - unique content 12345"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/octet-stream",
+    }
+
+    try:
+        upload_response = requests.post(
+            upload_endpoint, headers=headers, data=test_content, timeout=30
+        )
+        if upload_response.status_code != 201:
+            results.record_fail(
+                "Upload blob for download test",
+                f"Got HTTP {upload_response.status_code}: {upload_response.text}",
+            )
+            return
+        upload_data = upload_response.json()
+        blob_id = upload_data.get("blobId")
+        if not blob_id:
+            results.record_fail("Upload blob for download test", "No blobId in response")
+            return
+        results.record_pass("Upload blob for download test", f"blobId: {blob_id}")
+    except Exception as e:
+        results.record_fail("Upload blob for download test", str(e))
+        return
+
+    # Build download URL from session.download_url template
+    download_url = session.download_url.replace("{accountId}", account_id).replace(
+        "{blobId}", blob_id
+    )
+
+    # Request download (should return 302 redirect)
+    try:
+        # Use allow_redirects=False to capture the 302
+        download_response = requests.get(
+            download_url,
+            headers={"Authorization": f"Bearer {token}"},
+            allow_redirects=False,
+            timeout=30,
+        )
+    except Exception as e:
+        results.record_fail("Blob download request", str(e))
+        return
+
+    # Test: Returns 302 redirect
+    if download_response.status_code == 302:
+        results.record_pass("Blob download returns 302 redirect")
+    else:
+        results.record_fail(
+            "Blob download returns 302 redirect",
+            f"Got HTTP {download_response.status_code}: {download_response.text}",
+        )
+        return
+
+    # Test: Has Location header
+    location = download_response.headers.get("Location")
+    if location:
+        results.record_pass("Blob download has Location header", location[:100] + "...")
+    else:
+        results.record_fail("Blob download has Location header", "No Location header")
+        return
+
+    # Test: Location is a CloudFront signed URL
+    if "Signature=" in location or "Key-Pair-Id=" in location:
+        results.record_pass("Location is CloudFront signed URL")
+    else:
+        results.record_fail(
+            "Location is CloudFront signed URL",
+            "URL doesn't contain signature parameters",
+        )
+
+    # Test: Following redirect returns original content
+    try:
+        content_response = requests.get(location, timeout=30)
+        if content_response.status_code == 200:
+            results.record_pass("CloudFront signed URL returns 200")
+            if content_response.content == test_content:
+                results.record_pass("Downloaded content matches uploaded content")
+            else:
+                results.record_fail(
+                    "Downloaded content matches uploaded content",
+                    f"Content mismatch: expected {len(test_content)} bytes, got {len(content_response.content)} bytes",
+                )
+        else:
+            results.record_fail(
+                "CloudFront signed URL returns 200",
+                f"Got HTTP {content_response.status_code}: {content_response.text}",
+            )
+    except Exception as e:
+        results.record_fail("Follow redirect to CloudFront", str(e))
+
+
+def test_blob_download_cross_account(client: Client, token: str, results: TestResult):
+    """
+    Test 6: Blob Download Cross-Account Access (should be forbidden)
+
+    Validates that attempting to download a blob using a different accountId
+    in the path returns 403 Forbidden.
+    """
+    print()
+    print("Testing Blob Download Cross-Account Access...")
+
+    session = client.jmap_session
+
+    if not session.download_url:
+        results.record_pass(
+            "Skip cross-account test", "download_url not available"
+        )
+        return
+
+    # Get actual account ID
+    try:
+        account_id = client.account_id
+    except Exception as e:
+        results.record_fail("Cross-account test", f"No account ID: {e}")
+        return
+
+    # First, upload a test blob to get a valid blobId
+    upload_endpoint = session.upload_url.replace("{accountId}", account_id)
+    test_content = b"Test blob for cross-account check"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/octet-stream",
+    }
+
+    try:
+        upload_response = requests.post(
+            upload_endpoint, headers=headers, data=test_content, timeout=30
+        )
+        if upload_response.status_code != 201:
+            results.record_fail(
+                "Upload blob for cross-account test",
+                f"Got HTTP {upload_response.status_code}",
+            )
+            return
+        upload_data = upload_response.json()
+        blob_id = upload_data.get("blobId")
+        if not blob_id:
+            results.record_fail("Upload blob for cross-account test", "No blobId")
+            return
+    except Exception as e:
+        results.record_fail("Upload blob for cross-account test", str(e))
+        return
+
+    # Try to download with a different accountId in the path
+    fake_account_id = "fake-account-id-12345"
+    download_url = session.download_url.replace(
+        "{accountId}", fake_account_id
+    ).replace("{blobId}", blob_id)
+
+    try:
+        response = requests.get(
+            download_url,
+            headers={"Authorization": f"Bearer {token}"},
+            allow_redirects=False,
+            timeout=30,
+        )
+    except Exception as e:
+        results.record_fail("Cross-account download request", str(e))
+        return
+
+    # Test: Returns 403 Forbidden (account ID mismatch)
+    if response.status_code == 403:
+        results.record_pass(
+            "Cross-account download returns 403",
+            "Correctly rejected access to different account",
+        )
+    else:
+        results.record_fail(
+            "Cross-account download returns 403",
+            f"Got HTTP {response.status_code}: {response.text}",
+        )
+
+
 def print_summary(results: TestResult):
     """Print test summary."""
     print()
@@ -371,6 +576,12 @@ def main():
 
         # Test 4: Blob Upload
         test_blob_upload(client, token, results)
+
+        # Test 5: Blob Download
+        test_blob_download(client, token, results)
+
+        # Test 6: Blob Download Cross-Account Access
+        test_blob_download_cross_account(client, token, results)
 
     # Print summary
     print_summary(results)

@@ -333,7 +333,7 @@ func TestBuildSession_WithInjectedConfig(t *testing.T) {
 		t.Errorf("expected apiUrl '%s', got '%s'", expectedAPIUrl, session.APIUrl)
 	}
 
-	expectedDownloadUrl := "https://test.example.com/v1/download/{accountId}/{blobId}/{name}"
+	expectedDownloadUrl := "https://test.example.com/v1/download/{accountId}/{blobId}"
 	if session.DownloadUrl != expectedDownloadUrl {
 		t.Errorf("expected downloadUrl '%s', got '%s'", expectedDownloadUrl, session.DownloadUrl)
 	}

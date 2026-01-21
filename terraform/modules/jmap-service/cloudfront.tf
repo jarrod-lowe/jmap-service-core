@@ -33,7 +33,60 @@ resource "aws_cloudfront_function" "jmap_redirect" {
   code    = file("${path.module}/cloudfront-functions/jmap-redirect.js")
 }
 
+# CloudFront Function for blob path rewrite
+# Strips /blobs prefix so /blobs/accountId/blobId becomes /accountId/blobId for S3
+resource "aws_cloudfront_function" "blob_path_rewrite" {
+  name    = "blob-path-rewrite-${var.environment}"
+  runtime = "cloudfront-js-2.0"
+  publish = true
+  code    = file("${path.module}/cloudfront-functions/blob-path-rewrite.js")
+}
+
+# =============================================================================
+# CloudFront Key Pair for Signed URLs
+# =============================================================================
+
+# CloudFront public key for signed URL validation (current key - always exists)
+# The corresponding private key is auto-generated and stored in Secrets Manager
+resource "aws_cloudfront_public_key" "blob_signing_current" {
+  name        = "blob-signing-key-current-${var.environment}"
+  comment     = "Current signing key for blob download signed URLs"
+  encoded_key = tls_private_key.cloudfront_signing_current.public_key_pem
+}
+
+# CloudFront public key for previous key (only during rotation)
+# This allows signed URLs created with the old key to continue working
+resource "aws_cloudfront_public_key" "blob_signing_previous" {
+  count       = var.cloudfront_signing_key_rotation_phase == "rotating" ? 1 : 0
+  name        = "blob-signing-key-previous-${var.environment}"
+  comment     = "Previous signing key (rotation in progress)"
+  encoded_key = tls_private_key.cloudfront_signing_previous[0].public_key_pem
+}
+
+resource "aws_cloudfront_key_group" "blob_signing" {
+  name    = "blob-signing-key-group-${var.environment}"
+  comment = "Key group for blob download signed URLs"
+  items = concat(
+    [aws_cloudfront_public_key.blob_signing_current.id],
+    var.cloudfront_signing_key_rotation_phase == "rotating" ? [aws_cloudfront_public_key.blob_signing_previous[0].id] : []
+  )
+}
+
+# =============================================================================
+# Origin Access Control for S3
+# =============================================================================
+
+resource "aws_cloudfront_origin_access_control" "blobs" {
+  name                              = "${local.resource_prefix}-blobs-oac-${var.environment}"
+  description                       = "OAC for blob bucket access"
+  origin_access_control_origin_type = "s3"
+  signing_behavior                  = "always"
+  signing_protocol                  = "sigv4"
+}
+
+# =============================================================================
 # CloudFront Distribution
+# =============================================================================
 
 resource "aws_cloudfront_distribution" "api" {
   enabled         = true
@@ -43,6 +96,7 @@ resource "aws_cloudfront_distribution" "api" {
   http_version    = "http2and3"
   is_ipv6_enabled = true
 
+  # API Gateway origin
   origin {
     domain_name = "${aws_api_gateway_rest_api.api.id}.execute-api.${var.aws_region}.amazonaws.com"
     origin_id   = "api-gateway"
@@ -53,6 +107,36 @@ resource "aws_cloudfront_distribution" "api" {
       https_port             = 443
       origin_protocol_policy = "https-only"
       origin_ssl_protocols   = ["TLSv1.2"]
+    }
+  }
+
+  # S3 origin for blob storage (accessed via signed URLs)
+  origin {
+    domain_name              = aws_s3_bucket.blobs.bucket_regional_domain_name
+    origin_id                = "s3-blobs"
+    origin_access_control_id = aws_cloudfront_origin_access_control.blobs.id
+  }
+
+  # Blob download path - requires signed URL
+  # Path pattern: /blobs/{accountId}/{blobId}
+  ordered_cache_behavior {
+    path_pattern           = "/blobs/*"
+    target_origin_id       = "s3-blobs"
+    viewer_protocol_policy = "redirect-to-https"
+    allowed_methods        = ["GET", "HEAD"]
+    cached_methods         = ["GET", "HEAD"]
+    compress               = true
+
+    # Use managed cache policy for S3 origin
+    cache_policy_id = data.aws_cloudfront_cache_policy.caching_optimized.id
+
+    # Require signed URLs
+    trusted_key_groups = [aws_cloudfront_key_group.blob_signing.id]
+
+    # Rewrite path to strip /blobs prefix before sending to S3
+    function_association {
+      event_type   = "viewer-request"
+      function_arn = aws_cloudfront_function.blob_path_rewrite.arn
     }
   }
 
@@ -97,11 +181,7 @@ resource "aws_cloudfront_distribution" "api" {
     }
   }
 
-  logging_config {
-    bucket          = aws_s3_bucket.cloudfront_logs.bucket_domain_name
-    prefix          = "cloudfront/"
-    include_cookies = false
-  }
+  # Note: Logging disabled for $0 plan. Enable logging_config block if needed.
 
   tags = {
     Name = "jmap-service-${var.environment}"
@@ -113,51 +193,10 @@ data "aws_cloudfront_cache_policy" "caching_disabled" {
   name = "Managed-CachingDisabled"
 }
 
+data "aws_cloudfront_cache_policy" "caching_optimized" {
+  name = "Managed-CachingOptimized"
+}
+
 data "aws_cloudfront_origin_request_policy" "all_viewer_except_host_header" {
   name = "Managed-AllViewerExceptHostHeader"
-}
-
-# S3 bucket for CloudFront logs
-resource "aws_s3_bucket" "cloudfront_logs" {
-  bucket = "jmap-service-cloudfront-logs-${var.environment}-${data.aws_caller_identity.current.account_id}"
-
-  tags = {
-    Name = "jmap-service-cloudfront-logs-${var.environment}"
-  }
-}
-
-resource "aws_s3_bucket_ownership_controls" "cloudfront_logs" {
-  bucket = aws_s3_bucket.cloudfront_logs.id
-
-  rule {
-    object_ownership = "BucketOwnerPreferred"
-  }
-}
-
-resource "aws_s3_bucket_acl" "cloudfront_logs" {
-  depends_on = [aws_s3_bucket_ownership_controls.cloudfront_logs]
-  bucket     = aws_s3_bucket.cloudfront_logs.id
-  acl        = "log-delivery-write"
-}
-
-resource "aws_s3_bucket_lifecycle_configuration" "cloudfront_logs" {
-  bucket = aws_s3_bucket.cloudfront_logs.id
-
-  rule {
-    id     = "expire-logs"
-    status = "Enabled"
-
-    expiration {
-      days = var.log_retention_days
-    }
-  }
-}
-
-resource "aws_s3_bucket_public_access_block" "cloudfront_logs" {
-  bucket = aws_s3_bucket.cloudfront_logs.id
-
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
 }

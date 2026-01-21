@@ -17,6 +17,14 @@ terraform {
       source  = "hashicorp/archive"
       version = "~> 2.0"
     }
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.9"
+    }
   }
 }
 
@@ -56,10 +64,13 @@ module "jmap_service" {
     aws.us_east_1 = aws.us_east_1
   }
 
-  aws_region         = var.aws_region
-  environment        = var.environment
-  log_retention_days = var.log_retention_days
-  lambda_memory_size = var.lambda_memory_size
-  lambda_timeout     = var.lambda_timeout
-  domain_name        = var.domain_name
+  aws_region                            = var.aws_region
+  environment                           = var.environment
+  log_retention_days                    = var.log_retention_days
+  lambda_memory_size                    = var.lambda_memory_size
+  lambda_timeout                        = var.lambda_timeout
+  domain_name                           = var.domain_name
+  signed_url_expiry_seconds             = var.signed_url_expiry_seconds
+  cloudfront_signing_key_rotation_phase = var.cloudfront_signing_key_rotation_phase
+  cloudfront_signing_key_max_age_days   = var.cloudfront_signing_key_max_age_days
 }
