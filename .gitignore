@@ -16,6 +16,10 @@ terraform/environments/*/terraform.tfvars
 scripts/.venv/
 __pycache__/
 
+# Node.js
+node_modules/
+package-lock.json
+
 # IDE
 .vscode/
 .idea/

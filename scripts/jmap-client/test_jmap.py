@@ -453,9 +453,153 @@ def test_blob_download(client: Client, token: str, results: TestResult):
         results.record_fail("Follow redirect to CloudFront", str(e))
 
 
+def test_blob_download_byte_range(client: Client, token: str, results: TestResult):
+    """
+    Test 6: Blob Download Byte Range (composite blobId)
+
+    Validates:
+    - Upload a blob with known content
+    - Download using composite blobId format: blobId,startByte,endByte
+    - Returns 302 redirect to CloudFront signed URL with range in path
+    - Following redirect returns 206 Partial Content with correct byte range
+    """
+    print()
+    print("Testing Blob Download Byte Range (composite blobId)...")
+
+    session = client.jmap_session
+
+    if not session.download_url:
+        results.record_fail("Session has download_url", "download_url not in session")
+        return
+
+    # Get account ID
+    try:
+        account_id = client.account_id
+    except Exception as e:
+        results.record_fail("Blob byte range test", f"No account ID: {e}")
+        return
+
+    # Upload a test blob with predictable content
+    upload_endpoint = session.upload_url.replace("{accountId}", account_id)
+    # Create content where we can easily verify byte ranges
+    # "0123456789" repeated = 100 bytes total
+    test_content = b"0123456789" * 10
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/octet-stream",
+    }
+
+    try:
+        upload_response = requests.post(
+            upload_endpoint, headers=headers, data=test_content, timeout=30
+        )
+        if upload_response.status_code != 201:
+            results.record_fail(
+                "Upload blob for byte range test",
+                f"Got HTTP {upload_response.status_code}: {upload_response.text}",
+            )
+            return
+        upload_data = upload_response.json()
+        blob_id = upload_data.get("blobId")
+        if not blob_id:
+            results.record_fail("Upload blob for byte range test", "No blobId in response")
+            return
+        results.record_pass("Upload blob for byte range test", f"blobId: {blob_id}, size: {len(test_content)}")
+    except Exception as e:
+        results.record_fail("Upload blob for byte range test", str(e))
+        return
+
+    # Build download URL with composite blobId: blobId,startByte,endByte
+    # Request bytes 10-29 (20 bytes: "0123456789" twice)
+    start_byte = 10
+    end_byte = 29
+    composite_blob_id = f"{blob_id},{start_byte},{end_byte}"
+    download_url = session.download_url.replace("{accountId}", account_id).replace(
+        "{blobId}", composite_blob_id
+    )
+
+    # Request download with composite blobId (should return 302 redirect)
+    try:
+        download_response = requests.get(
+            download_url,
+            headers={"Authorization": f"Bearer {token}"},
+            allow_redirects=False,
+            timeout=30,
+        )
+    except Exception as e:
+        results.record_fail("Byte range download request", str(e))
+        return
+
+    # Test: Returns 302 redirect
+    if download_response.status_code == 302:
+        results.record_pass("Byte range download returns 302 redirect")
+    else:
+        results.record_fail(
+            "Byte range download returns 302 redirect",
+            f"Got HTTP {download_response.status_code}: {download_response.text}",
+        )
+        return
+
+    # Test: Location header contains composite blobId
+    location = download_response.headers.get("Location")
+    if not location:
+        results.record_fail("Byte range download has Location header", "No Location header")
+        return
+
+    if composite_blob_id in location or f"{start_byte},{end_byte}" in location:
+        results.record_pass("Location contains byte range", location[:100] + "...")
+    else:
+        results.record_fail(
+            "Location contains byte range",
+            f"Expected range in URL, got: {location[:100]}...",
+        )
+
+    # Test: Follow redirect - should get 206 Partial Content
+    try:
+        content_response = requests.get(location, timeout=30)
+
+        # S3 returns 206 for Range requests
+        if content_response.status_code == 206:
+            results.record_pass("CloudFront returns 206 Partial Content")
+        elif content_response.status_code == 200:
+            # Some configurations may return 200 with full content if Range not supported
+            results.record_pass(
+                "CloudFront returns 200",
+                "Note: Range header may not have been applied",
+            )
+        else:
+            results.record_fail(
+                "CloudFront returns 206 Partial Content",
+                f"Got HTTP {content_response.status_code}: {content_response.text[:200]}",
+            )
+            return
+
+        # Test: Content is the expected byte range
+        expected_content = test_content[start_byte : end_byte + 1]  # Range is inclusive
+        if content_response.content == expected_content:
+            results.record_pass(
+                "Downloaded content matches byte range",
+                f"Got {len(content_response.content)} bytes: {content_response.content[:20]}...",
+            )
+        else:
+            # If we got 200, check if we got full content (Range not applied)
+            if content_response.content == test_content:
+                results.record_fail(
+                    "Downloaded content matches byte range",
+                    f"Got full content ({len(content_response.content)} bytes) instead of range",
+                )
+            else:
+                results.record_fail(
+                    "Downloaded content matches byte range",
+                    f"Expected {len(expected_content)} bytes, got {len(content_response.content)} bytes",
+                )
+    except Exception as e:
+        results.record_fail("Follow redirect for byte range", str(e))
+
+
 def test_blob_download_cross_account(client: Client, token: str, results: TestResult):
     """
-    Test 6: Blob Download Cross-Account Access (should be forbidden)
+    Test 7: Blob Download Cross-Account Access (should be forbidden)
 
     Validates that attempting to download a blob using a different accountId
     in the path returns 403 Forbidden.
@@ -580,7 +724,10 @@ def main():
         # Test 5: Blob Download
         test_blob_download(client, token, results)
 
-        # Test 6: Blob Download Cross-Account Access
+        # Test 6: Blob Download Byte Range
+        test_blob_download_byte_range(client, token, results)
+
+        # Test 7: Blob Download Cross-Account Access
         test_blob_download_cross_account(client, token, results)
 
     # Print summary

@@ -1,4 +1,4 @@
-.PHONY: help deps build build-all package package-all test integration-test jmap-client-test lint init plan show-plan apply plan-destroy destroy clean clean-all fmt validate outputs restore-tfvars help-tfvars invalidate-cache
+.PHONY: help deps build build-all package package-all test test-go test-cloudfront integration-test jmap-client-test lint init plan show-plan apply plan-destroy destroy clean clean-all fmt validate outputs restore-tfvars help-tfvars invalidate-cache
 
 # Environment selection (test or prod)
 ENV ?= test
@@ -44,7 +44,9 @@ help:
 	@echo "  make deps                    - Initialize go.mod and fetch dependencies"
 	@echo "  make build                   - Compile all Go lambdas (linux/arm64)"
 	@echo "  make package                 - Create all Lambda deployment packages (zip)"
-	@echo "  make test                    - Run Go unit tests"
+	@echo "  make test                    - Run all tests (Go + CloudFront)"
+	@echo "  make test-go                 - Run Go unit tests only"
+	@echo "  make test-cloudfront         - Run CloudFront function tests only"
 	@echo "  make integration-test ENV=<env> - Run integration tests against deployed env"
 	@echo "  make jmap-client-test ENV=<env> - Run JMAP protocol compliance tests (jmapc)"
 	@echo "  make lint                    - Run golangci-lint (required)"
@@ -114,10 +116,24 @@ package-all: $(LAMBDA_ZIPS)
 build: build-all
 package: package-all
 
-# Run tests
-test:
+# Run Go tests
+test-go:
 	@echo "Running Go tests..."
 	go test -v ./...
+
+# CloudFront function test dependencies
+$(MODULE_DIR)/cloudfront-functions/node_modules: $(MODULE_DIR)/cloudfront-functions/package.json
+	@echo "Installing CloudFront function test dependencies..."
+	cd $(MODULE_DIR)/cloudfront-functions && npm install
+	@touch $@
+
+# Run CloudFront function tests
+test-cloudfront: $(MODULE_DIR)/cloudfront-functions/node_modules
+	@echo "Running CloudFront function tests..."
+	cd $(MODULE_DIR)/cloudfront-functions && npm test
+
+# Run all tests
+test: test-go test-cloudfront
 
 # Run integration tests against deployed environment
 integration-test:

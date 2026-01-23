@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
@@ -52,6 +53,59 @@ type BlobRecord struct {
 	ContentType string `dynamodbav:"contentType"`
 	S3Key       string `dynamodbav:"s3Key"`
 	CreatedAt   string `dynamodbav:"createdAt"`
+}
+
+// ParsedBlobID contains the parsed components of a potentially composite blobId
+type ParsedBlobID struct {
+	BaseBlobID string
+	HasRange   bool
+	StartByte  int64
+	EndByte    int64
+}
+
+// ParseBlobID parses a blobId which may be composite (baseBlobId,startByte,endByte)
+// Returns the parsed components. For simple blobIds, HasRange will be false.
+func ParseBlobID(blobID string) (ParsedBlobID, error) {
+	parts := strings.Split(blobID, ",")
+
+	switch len(parts) {
+	case 1, 2:
+		// Simple blobId (no commas or one comma - treated as simple)
+		return ParsedBlobID{BaseBlobID: blobID, HasRange: false}, nil
+
+	case 3:
+		// Composite blobId: baseBlobId,startByte,endByte
+		baseBlobID := parts[0]
+
+		startByte, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			return ParsedBlobID{}, fmt.Errorf("invalid start byte: %w", err)
+		}
+
+		endByte, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			return ParsedBlobID{}, fmt.Errorf("invalid end byte: %w", err)
+		}
+
+		if startByte < 0 {
+			return ParsedBlobID{}, fmt.Errorf("start byte must be non-negative")
+		}
+
+		if startByte >= endByte {
+			return ParsedBlobID{}, fmt.Errorf("start byte must be less than end byte")
+		}
+
+		return ParsedBlobID{
+			BaseBlobID: baseBlobID,
+			HasRange:   true,
+			StartByte:  startByte,
+			EndByte:    endByte,
+		}, nil
+
+	default:
+		// Too many commas
+		return ParsedBlobID{}, fmt.Errorf("invalid blobId format: too many commas")
+	}
 }
 
 // ErrorResponse is the error response format
@@ -99,6 +153,17 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 		return errorResponse(400, "invalidArguments", "Missing blobId in path")
 	}
 
+	// Parse blobId (may be composite: baseBlobId,startByte,endByte)
+	parsedBlobID, err := ParseBlobID(blobID)
+	if err != nil {
+		logger.WarnContext(ctx, "Invalid blobId format",
+			slog.String("request_id", request.RequestContext.RequestID),
+			slog.String("blob_id", blobID),
+			slog.String("error", err.Error()),
+		)
+		return errorResponse(400, "invalidArguments", "Invalid blobId format")
+	}
+
 	// Extract authenticated account ID (from JWT or path for IAM)
 	authAccountID, err := extractAccountID(request)
 	if err != nil {
@@ -119,8 +184,8 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 		return errorResponse(403, "forbidden", "Account ID mismatch")
 	}
 
-	// Look up blob in DynamoDB
-	blob, err := deps.DB.GetBlob(ctx, pathAccountID, blobID)
+	// Look up blob in DynamoDB using base blob ID (without range suffix)
+	blob, err := deps.DB.GetBlob(ctx, pathAccountID, parsedBlobID.BaseBlobID)
 	if err != nil {
 		logger.ErrorContext(ctx, "Failed to get blob from DynamoDB",
 			slog.String("request_id", request.RequestContext.RequestID),
@@ -150,7 +215,8 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 	}
 
 	// Generate CloudFront signed URL
-	blobURL := fmt.Sprintf("https://%s/blobs/%s", deps.Config.CloudFrontDomain, blob.S3Key)
+	// Use the original blobId (which may include range suffix) so CloudFront function can extract it
+	blobURL := fmt.Sprintf("https://%s/blobs/%s/%s", deps.Config.CloudFrontDomain, pathAccountID, blobID)
 	expiry := time.Now().Add(deps.Config.SignedURLExpiry)
 
 	signedURL, err := deps.Signer.Sign(blobURL, expiry)

@@ -11,6 +11,111 @@ import (
 	"github.com/aws/aws-lambda-go/events"
 )
 
+// =============================================================================
+// ParseBlobID unit tests
+// =============================================================================
+
+func TestParseBlobID_SimpleBlobID(t *testing.T) {
+	result, err := ParseBlobID("abc123")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.BaseBlobID != "abc123" {
+		t.Errorf("expected BaseBlobID 'abc123', got '%s'", result.BaseBlobID)
+	}
+	if result.HasRange {
+		t.Error("expected HasRange to be false for simple blobId")
+	}
+}
+
+func TestParseBlobID_CompositeBlobID(t *testing.T) {
+	result, err := ParseBlobID("abc123,1024,5120")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.BaseBlobID != "abc123" {
+		t.Errorf("expected BaseBlobID 'abc123', got '%s'", result.BaseBlobID)
+	}
+	if !result.HasRange {
+		t.Error("expected HasRange to be true for composite blobId")
+	}
+	if result.StartByte != 1024 {
+		t.Errorf("expected StartByte 1024, got %d", result.StartByte)
+	}
+	if result.EndByte != 5120 {
+		t.Errorf("expected EndByte 5120, got %d", result.EndByte)
+	}
+}
+
+func TestParseBlobID_NegativeStart(t *testing.T) {
+	_, err := ParseBlobID("abc123,-1,100")
+	if err == nil {
+		t.Error("expected error for negative start byte")
+	}
+}
+
+func TestParseBlobID_StartGreaterThanOrEqualEnd(t *testing.T) {
+	// start == end
+	_, err := ParseBlobID("abc123,100,100")
+	if err == nil {
+		t.Error("expected error when start == end")
+	}
+
+	// start > end
+	_, err = ParseBlobID("abc123,100,50")
+	if err == nil {
+		t.Error("expected error when start > end")
+	}
+}
+
+func TestParseBlobID_NonNumericValues(t *testing.T) {
+	_, err := ParseBlobID("abc123,foo,bar")
+	if err == nil {
+		t.Error("expected error for non-numeric start/end")
+	}
+}
+
+func TestParseBlobID_TooManyCommas(t *testing.T) {
+	_, err := ParseBlobID("a,b,c,d")
+	if err == nil {
+		t.Error("expected error for too many commas")
+	}
+}
+
+func TestParseBlobID_OneComma(t *testing.T) {
+	// Edge case: blobId with one comma should be treated as simple blobId
+	result, err := ParseBlobID("abc,def")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.BaseBlobID != "abc,def" {
+		t.Errorf("expected BaseBlobID 'abc,def', got '%s'", result.BaseBlobID)
+	}
+	if result.HasRange {
+		t.Error("expected HasRange to be false for blobId with one comma")
+	}
+}
+
+func TestParseBlobID_ZeroStartByte(t *testing.T) {
+	// Zero is valid for start byte
+	result, err := ParseBlobID("abc123,0,999")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.BaseBlobID != "abc123" {
+		t.Errorf("expected BaseBlobID 'abc123', got '%s'", result.BaseBlobID)
+	}
+	if !result.HasRange {
+		t.Error("expected HasRange to be true")
+	}
+	if result.StartByte != 0 {
+		t.Errorf("expected StartByte 0, got %d", result.StartByte)
+	}
+	if result.EndByte != 999 {
+		t.Errorf("expected EndByte 999, got %d", result.EndByte)
+	}
+}
+
 // Mock implementations for testing
 
 type mockBlobDB struct {
@@ -577,5 +682,245 @@ func TestDownload_RedirectBodyEmpty(t *testing.T) {
 
 	if response.Body != "" {
 		t.Errorf("expected empty body for redirect, got %s", response.Body)
+	}
+}
+
+// =============================================================================
+// Composite blobId integration tests
+// =============================================================================
+
+// Test 13: Composite blobId returns 302 with signed URL containing full composite blobId
+func TestDownload_CompositeBlobID_Success(t *testing.T) {
+	blob := &BlobRecord{
+		BlobID:      "blob-123", // Base blob ID
+		AccountID:   "user-456",
+		Size:        10240,
+		ContentType: "message/rfc822",
+		S3Key:       "user-456/blob-123",
+		CreatedAt:   "2024-01-01T00:00:00Z",
+	}
+
+	db := &mockBlobDB{blob: blob}
+	signer := &mockURLSigner{signedURL: "https://cdn.example.com/signed"}
+	secrets := &mockSecretsReader{}
+	setupTestDeps(db, signer, secrets)
+
+	request := events.APIGatewayProxyRequest{
+		PathParameters: map[string]string{
+			"accountId": "user-456",
+			"blobId":    "blob-123,1024,5120", // Composite blobId
+		},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "req-abc",
+			Authorizer: map[string]any{
+				"claims": map[string]any{
+					"sub": "user-456",
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	if response.StatusCode != 302 {
+		t.Errorf("expected status code 302, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+
+	// Verify the URL passed to signer contains the full composite blobId
+	expectedURL := "https://cdn.example.com/blobs/user-456/blob-123,1024,5120"
+	if signer.lastURL != expectedURL {
+		t.Errorf("expected signed URL to contain composite blobId\nexpected: %s\ngot: %s", expectedURL, signer.lastURL)
+	}
+}
+
+// Test 14: Composite blobId with nonexistent base ID returns 404
+func TestDownload_CompositeBlobID_NotFound(t *testing.T) {
+	db := &mockBlobDB{blob: nil} // No blob found
+	signer := &mockURLSigner{}
+	secrets := &mockSecretsReader{}
+	setupTestDeps(db, signer, secrets)
+
+	request := events.APIGatewayProxyRequest{
+		PathParameters: map[string]string{
+			"accountId": "user-456",
+			"blobId":    "nonexistent,1024,5120", // Composite blobId with nonexistent base
+		},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "req-abc",
+			Authorizer: map[string]any{
+				"claims": map[string]any{
+					"sub": "user-456",
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	if response.StatusCode != 404 {
+		t.Errorf("expected status code 404, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+
+	var errResp ErrorResponse
+	if err := json.Unmarshal([]byte(response.Body), &errResp); err != nil {
+		t.Fatalf("failed to unmarshal error response: %v", err)
+	}
+
+	if errResp.Type != "notFound" {
+		t.Errorf("expected error type 'notFound', got '%s'", errResp.Type)
+	}
+}
+
+// Test 15: Composite blobId with wrong account returns 403
+func TestDownload_CompositeBlobID_WrongAccount(t *testing.T) {
+	db := &mockBlobDB{}
+	signer := &mockURLSigner{}
+	secrets := &mockSecretsReader{}
+	setupTestDeps(db, signer, secrets)
+
+	request := events.APIGatewayProxyRequest{
+		PathParameters: map[string]string{
+			"accountId": "user-456",
+			"blobId":    "blob-123,1024,5120",
+		},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "req-abc",
+			Authorizer: map[string]any{
+				"claims": map[string]any{
+					"sub": "different-user", // Different from path accountId
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	if response.StatusCode != 403 {
+		t.Errorf("expected status code 403, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+
+	var errResp ErrorResponse
+	if err := json.Unmarshal([]byte(response.Body), &errResp); err != nil {
+		t.Fatalf("failed to unmarshal error response: %v", err)
+	}
+
+	if errResp.Type != "forbidden" {
+		t.Errorf("expected error type 'forbidden', got '%s'", errResp.Type)
+	}
+}
+
+// Test 16: Invalid composite blobId format returns 400
+func TestDownload_CompositeBlobID_InvalidFormat(t *testing.T) {
+	db := &mockBlobDB{}
+	signer := &mockURLSigner{}
+	secrets := &mockSecretsReader{}
+	setupTestDeps(db, signer, secrets)
+
+	testCases := []struct {
+		name   string
+		blobId string
+	}{
+		{"negative start", "blob-123,-1,100"},
+		{"start >= end", "blob-123,100,50"},
+		{"non-numeric", "blob-123,foo,bar"},
+		{"too many commas", "a,b,c,d"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			request := events.APIGatewayProxyRequest{
+				PathParameters: map[string]string{
+					"accountId": "user-456",
+					"blobId":    tc.blobId,
+				},
+				RequestContext: events.APIGatewayProxyRequestContext{
+					RequestID: "req-abc",
+					Authorizer: map[string]any{
+						"claims": map[string]any{
+							"sub": "user-456",
+						},
+					},
+				},
+			}
+
+			ctx := context.Background()
+			response, err := handler(ctx, request)
+			if err != nil {
+				t.Fatalf("handler returned error: %v", err)
+			}
+
+			if response.StatusCode != 400 {
+				t.Errorf("expected status code 400, got %d. Body: %s", response.StatusCode, response.Body)
+			}
+
+			var errResp ErrorResponse
+			if err := json.Unmarshal([]byte(response.Body), &errResp); err != nil {
+				t.Fatalf("failed to unmarshal error response: %v", err)
+			}
+
+			if errResp.Type != "invalidArguments" {
+				t.Errorf("expected error type 'invalidArguments', got '%s'", errResp.Type)
+			}
+		})
+	}
+}
+
+// Test 17: Verifies DynamoDB lookup uses base blob ID, not composite
+func TestDownload_CompositeBlobID_LookupUsesBaseID(t *testing.T) {
+	var capturedBlobID string
+
+	db := &mockBlobDB{
+		getFunc: func(ctx context.Context, accountID, blobID string) (*BlobRecord, error) {
+			capturedBlobID = blobID
+			return &BlobRecord{
+				BlobID:      "blob-123",
+				AccountID:   "user-456",
+				Size:        10240,
+				ContentType: "message/rfc822",
+				S3Key:       "user-456/blob-123",
+				CreatedAt:   "2024-01-01T00:00:00Z",
+			}, nil
+		},
+	}
+	signer := &mockURLSigner{signedURL: "https://signed-url"}
+	secrets := &mockSecretsReader{}
+	setupTestDeps(db, signer, secrets)
+
+	request := events.APIGatewayProxyRequest{
+		PathParameters: map[string]string{
+			"accountId": "user-456",
+			"blobId":    "blob-123,1024,5120", // Composite blobId
+		},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "req-abc",
+			Authorizer: map[string]any{
+				"claims": map[string]any{
+					"sub": "user-456",
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	_, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	// Verify DynamoDB was queried with base blob ID, not composite
+	if capturedBlobID != "blob-123" {
+		t.Errorf("expected DynamoDB lookup with 'blob-123', got '%s'", capturedBlobID)
 	}
 }
