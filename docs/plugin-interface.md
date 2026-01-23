@@ -6,6 +6,56 @@ This document describes the plugin interface for extending the JMAP service with
 
 Plugins extend the JMAP service by registering handlers for JMAP method calls. The core service discovers plugins via DynamoDB records and dispatches method calls to plugin Lambda functions.
 
+## Infrastructure Discovery
+
+Plugins discover core infrastructure values via AWS SSM Parameter Store. This eliminates hardcoded values and cross-stack dependencies.
+
+### Available Parameters
+
+All parameters are under the path `/${resource_prefix}/${environment}/`:
+
+| Parameter | Description |
+|-----------|-------------|
+| `api-gateway-execution-arn` | API Gateway execution ARN for Lambda permissions |
+| `api-url` | Public API URL (CloudFront/custom domain) |
+| `dynamodb-table-name` | Core DynamoDB table name for plugin registration |
+| `dynamodb-table-arn` | Core DynamoDB table ARN for IAM policies |
+
+### Example: Discovering Parameters in Terraform
+
+```hcl
+variable "environment" {
+  description = "Deployment environment"
+  type        = string
+}
+
+locals {
+  ssm_prefix = "/jmap-service-core/${var.environment}"
+}
+
+data "aws_ssm_parameter" "jmap_table_name" {
+  name = "${local.ssm_prefix}/dynamodb-table-name"
+}
+
+data "aws_ssm_parameter" "jmap_table_arn" {
+  name = "${local.ssm_prefix}/dynamodb-table-arn"
+}
+
+data "aws_ssm_parameter" "jmap_api_url" {
+  name = "${local.ssm_prefix}/api-url"
+}
+
+data "aws_ssm_parameter" "jmap_api_gateway_execution_arn" {
+  name = "${local.ssm_prefix}/api-gateway-execution-arn"
+}
+
+# Use in resources:
+resource "aws_dynamodb_table_item" "plugin_registration" {
+  table_name = data.aws_ssm_parameter.jmap_table_name.value
+  # ...
+}
+```
+
 ## Plugin Registration
 
 Plugins register themselves by creating a DynamoDB record in the core service's table.
@@ -170,13 +220,8 @@ Standard JMAP error types (RFC 8620 Section 3.6.2):
 
 ```hcl
 # variables.tf
-variable "jmap_core_table_name" {
-  description = "Name of the JMAP core DynamoDB table"
-  type        = string
-}
-
-variable "jmap_core_table_arn" {
-  description = "ARN of the JMAP core DynamoDB table"
+variable "environment" {
+  description = "Deployment environment (test, prod)"
   type        = string
 }
 
@@ -190,6 +235,23 @@ variable "plugin_version" {
   description = "Plugin version"
   type        = string
   default     = "1.0.0"
+}
+
+# ssm_discovery.tf - Discover core infrastructure via SSM
+locals {
+  ssm_prefix = "/jmap-service-core/${var.environment}"
+}
+
+data "aws_ssm_parameter" "jmap_table_name" {
+  name = "${local.ssm_prefix}/dynamodb-table-name"
+}
+
+data "aws_ssm_parameter" "jmap_table_arn" {
+  name = "${local.ssm_prefix}/dynamodb-table-arn"
+}
+
+data "aws_ssm_parameter" "jmap_api_gateway_execution_arn" {
+  name = "${local.ssm_prefix}/api-gateway-execution-arn"
 }
 
 # lambda.tf
@@ -211,7 +273,7 @@ resource "aws_lambda_function" "email_import" {
 
 # registration.tf
 resource "aws_dynamodb_table_item" "plugin_registration" {
-  table_name = var.jmap_core_table_name
+  table_name = data.aws_ssm_parameter.jmap_table_name.value
   hash_key   = "pk"
   range_key  = "sk"
 
@@ -262,7 +324,7 @@ resource "aws_lambda_permission" "allow_jmap_core_email_read" {
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.email_read.function_name
   principal     = "lambda.amazonaws.com"
-  source_arn    = "arn:aws:lambda:*:*:function:jmap-api-*"
+  source_arn    = "${data.aws_ssm_parameter.jmap_api_gateway_execution_arn.value}/*"
 }
 
 resource "aws_lambda_permission" "allow_jmap_core_email_import" {
@@ -270,7 +332,7 @@ resource "aws_lambda_permission" "allow_jmap_core_email_import" {
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.email_import.function_name
   principal     = "lambda.amazonaws.com"
-  source_arn    = "arn:aws:lambda:*:*:function:jmap-api-*"
+  source_arn    = "${data.aws_ssm_parameter.jmap_api_gateway_execution_arn.value}/*"
 }
 ```
 
