@@ -108,6 +108,8 @@ load_config() {
     USER_POOL_ID=$(tf_output "cognito_user_pool_id")
     CLIENT_ID=$(tf_output "cognito_client_id")
     JMAP_HOST=$(tf_output "jmap_host")
+    BLOB_BUCKET=$(tf_output "blob_bucket_name")
+    DYNAMODB_TABLE=$(tf_output "dynamodb_table_name")
 
     # Extract region from Cognito User Pool ID (format: region_xxxxxx)
     REGION=$(echo "$USER_POOL_ID" | cut -d'_' -f1)
@@ -160,6 +162,9 @@ run_python_test() {
     # Export environment variables for the Python script
     export JMAP_HOST="$JMAP_HOST"
     export JMAP_API_TOKEN="$TOKEN"
+    export BLOB_BUCKET="$BLOB_BUCKET"
+    export DYNAMODB_TABLE="$DYNAMODB_TABLE"
+    export AWS_REGION="$REGION"
 
     # Run the Python test script
     "$VENV_DIR/bin/python" "$SCRIPT_DIR/jmap-client/test_jmap.py"

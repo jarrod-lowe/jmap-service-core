@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
@@ -30,7 +31,7 @@ var (
 // BlobStorage handles S3 operations
 type BlobStorage interface {
 	Upload(ctx context.Context, req UploadRequest) error
-	ConfirmUpload(ctx context.Context, accountID, blobID string) error
+	ConfirmUpload(ctx context.Context, accountID, blobID, parentTag string) error
 }
 
 // BlobDB handles DynamoDB operations
@@ -49,6 +50,7 @@ type UploadRequest struct {
 	Body        []byte
 	ContentType string
 	AccountID   string
+	ParentTag   string // Optional X-Parent header value
 }
 
 // BlobRecord represents a blob record in DynamoDB
@@ -59,6 +61,7 @@ type BlobRecord struct {
 	ContentType string
 	S3Key       string
 	CreatedAt   string
+	Parent      string // Optional parent tag from X-Parent header
 }
 
 // BlobUploadResponse is the RFC 8620 blob upload response
@@ -112,6 +115,16 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 		return errorResponse(400, "invalidArguments", "Content-Type header is required")
 	}
 
+	// Validate X-Parent header if present
+	parentTag := getParentHeader(request.Headers)
+	if parentTag != "" && !isValidParentTag(parentTag) {
+		logger.WarnContext(ctx, "Invalid X-Parent header",
+			slog.String("request_id", request.RequestContext.RequestID),
+			slog.String("parent_tag", parentTag),
+		)
+		return errorResponse(400, "invalidArguments", "X-Parent header contains invalid characters or exceeds 128 characters")
+	}
+
 	// Decode body
 	body, err := decodeBody(request)
 	if err != nil {
@@ -132,6 +145,7 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 		Body:        body,
 		ContentType: contentType,
 		AccountID:   accountID,
+		ParentTag:   parentTag,
 	}
 	if err := deps.Storage.Upload(ctx, uploadReq); err != nil {
 		logger.ErrorContext(ctx, "Failed to upload to S3",
@@ -149,6 +163,7 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 		ContentType: contentType,
 		S3Key:       s3Key,
 		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+		Parent:      parentTag,
 	}
 	if err := deps.DB.CreateBlobRecord(ctx, record); err != nil {
 		logger.ErrorContext(ctx, "Failed to create DynamoDB record",
@@ -159,7 +174,7 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 	}
 
 	// Confirm upload (update S3 tag to confirmed)
-	if err := deps.Storage.ConfirmUpload(ctx, accountID, blobID); err != nil {
+	if err := deps.Storage.ConfirmUpload(ctx, accountID, blobID, parentTag); err != nil {
 		logger.ErrorContext(ctx, "Failed to confirm upload",
 			slog.String("request_id", request.RequestContext.RequestID),
 			slog.String("error", err.Error()),
@@ -225,6 +240,49 @@ func extractAccountID(request events.APIGatewayProxyRequest) (string, error) {
 	return sub, nil
 }
 
+// isValidParentTag validates the X-Parent header value against AWS tag rules
+// Returns false for empty strings, strings > 128 chars, or invalid characters
+// Allowed characters: letters, numbers, whitespace, + - = . _ : / @
+func isValidParentTag(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, r := range value {
+		if !isAllowedTagChar(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// isAllowedTagChar checks if a rune is allowed in AWS tag values
+func isAllowedTagChar(r rune) bool {
+	if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+		return true
+	}
+	if r >= '0' && r <= '9' {
+		return true
+	}
+	if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+		return true
+	}
+	switch r {
+	case '+', '-', '=', '.', '_', ':', '/', '@':
+		return true
+	}
+	return false
+}
+
+// getParentHeader extracts X-Parent header value (case-insensitive)
+func getParentHeader(headers map[string]string) string {
+	for k, v := range headers {
+		if strings.EqualFold(k, "X-Parent") {
+			return v
+		}
+	}
+	return ""
+}
+
 // getContentType extracts Content-Type from headers (case-insensitive)
 func getContentType(headers map[string]string) string {
 	for k, v := range headers {
@@ -269,27 +327,35 @@ func NewS3BlobStorage(client *s3.Client, bucketName string) *S3BlobStorage {
 
 // Upload uploads a blob to S3 with pending status tag
 func (s *S3BlobStorage) Upload(ctx context.Context, req UploadRequest) error {
+	tagging := fmt.Sprintf("Account=%s&Status=pending", req.AccountID)
+	if req.ParentTag != "" {
+		tagging += fmt.Sprintf("&Parent=%s", req.ParentTag)
+	}
 	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(s.bucketName),
 		Key:         aws.String(req.Key),
 		Body:        bytes.NewReader(req.Body),
 		ContentType: aws.String(req.ContentType),
-		Tagging:     aws.String(fmt.Sprintf("Account=%s&Status=pending", req.AccountID)),
+		Tagging:     aws.String(tagging),
 	})
 	return err
 }
 
 // ConfirmUpload updates the S3 object tag to confirmed
-func (s *S3BlobStorage) ConfirmUpload(ctx context.Context, accountID, blobID string) error {
+func (s *S3BlobStorage) ConfirmUpload(ctx context.Context, accountID, blobID, parentTag string) error {
 	key := fmt.Sprintf("%s/%s", accountID, blobID)
+	tagSet := []types.Tag{
+		{Key: aws.String("Account"), Value: aws.String(accountID)},
+		{Key: aws.String("Status"), Value: aws.String("confirmed")},
+	}
+	if parentTag != "" {
+		tagSet = append(tagSet, types.Tag{Key: aws.String("Parent"), Value: aws.String(parentTag)})
+	}
 	_, err := s.client.PutObjectTagging(ctx, &s3.PutObjectTaggingInput{
 		Bucket: aws.String(s.bucketName),
 		Key:    aws.String(key),
 		Tagging: &types.Tagging{
-			TagSet: []types.Tag{
-				{Key: aws.String("Account"), Value: aws.String(accountID)},
-				{Key: aws.String("Status"), Value: aws.String("confirmed")},
-			},
+			TagSet: tagSet,
 		},
 	})
 	return err
@@ -320,6 +386,9 @@ func (d *DynamoDBBlobDB) CreateBlobRecord(ctx context.Context, record BlobRecord
 		"contentType": record.ContentType,
 		"s3Key":       record.S3Key,
 		"createdAt":   record.CreatedAt,
+	}
+	if record.Parent != "" {
+		item["parent"] = record.Parent
 	}
 
 	av, err := attributevalue.MarshalMap(item)

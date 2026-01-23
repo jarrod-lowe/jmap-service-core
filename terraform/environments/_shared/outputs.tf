@@ -101,3 +101,14 @@ output "cloudfront_key_pair_id" {
   description = "CloudFront key pair ID for signed URL generation"
   value       = module.jmap_service.cloudfront_key_pair_id
 }
+
+# Storage outputs for e2e tests
+output "blob_bucket_name" {
+  description = "Name of the S3 bucket for blob storage"
+  value       = module.jmap_service.blob_bucket_name
+}
+
+output "dynamodb_table_name" {
+  description = "Name of the DynamoDB table"
+  value       = module.jmap_service.dynamodb_table_name
+}

@@ -107,3 +107,14 @@ output "cloudfront_key_pair_id" {
   description = "CloudFront key pair ID for signed URL generation"
   value       = aws_cloudfront_public_key.blob_signing_current.id
 }
+
+# Storage outputs for e2e tests
+output "blob_bucket_name" {
+  description = "Name of the S3 bucket for blob storage"
+  value       = aws_s3_bucket.blobs.bucket
+}
+
+output "dynamodb_table_name" {
+  description = "Name of the DynamoDB table"
+  value       = aws_dynamodb_table.jmap_data.name
+}

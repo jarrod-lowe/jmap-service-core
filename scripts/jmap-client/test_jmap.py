@@ -17,6 +17,7 @@ Exit codes:
 import os
 import sys
 
+import boto3
 import requests
 from jmapc import Client
 from jmapc.methods import CoreEcho, EmailQuery
@@ -62,10 +63,24 @@ class TestResult:
         return self.failed == 0
 
 
-def get_config() -> tuple[str, str]:
+class Config:
+    """Configuration container for test settings."""
+
+    def __init__(self, host: str, token: str, blob_bucket: str | None, dynamodb_table: str | None, region: str):
+        self.host = host
+        self.token = token
+        self.blob_bucket = blob_bucket
+        self.dynamodb_table = dynamodb_table
+        self.region = region
+
+
+def get_config() -> Config:
     """Get configuration from environment variables."""
     host = os.environ.get("JMAP_HOST")
     token = os.environ.get("JMAP_API_TOKEN")
+    blob_bucket = os.environ.get("BLOB_BUCKET")
+    dynamodb_table = os.environ.get("DYNAMODB_TABLE")
+    region = os.environ.get("AWS_REGION", "ap-southeast-2")
 
     if not host:
         print(f"{Colors.RED}ERROR: JMAP_HOST environment variable not set{Colors.NC}")
@@ -75,7 +90,7 @@ def get_config() -> tuple[str, str]:
         print(f"{Colors.RED}ERROR: JMAP_API_TOKEN environment variable not set{Colors.NC}")
         sys.exit(1)
 
-    return host, token
+    return Config(host, token, blob_bucket, dynamodb_table, region)
 
 
 def test_client_connection(host: str, token: str, results: TestResult) -> Client | None:
@@ -679,6 +694,354 @@ def test_blob_download_cross_account(client: Client, token: str, results: TestRe
         )
 
 
+def get_s3_tags(bucket: str, account_id: str, blob_id: str, region: str) -> dict[str, str]:
+    """Get S3 object tags for a blob."""
+    s3_client = boto3.client("s3", region_name=region)
+    key = f"{account_id}/{blob_id}"
+    response = s3_client.get_object_tagging(Bucket=bucket, Key=key)
+    return {tag["Key"]: tag["Value"] for tag in response["TagSet"]}
+
+
+def get_dynamodb_blob(table: str, account_id: str, blob_id: str, region: str) -> dict | None:
+    """Get DynamoDB blob record."""
+    dynamodb = boto3.resource("dynamodb", region_name=region)
+    table = dynamodb.Table(table)
+    response = table.get_item(Key={"pk": f"ACCOUNT#{account_id}", "sk": f"BLOB#{blob_id}"})
+    return response.get("Item")
+
+
+def test_blob_upload_with_x_parent(client: Client, config: Config, results: TestResult):
+    """
+    Test 8: Blob Upload with Valid X-Parent Header
+
+    Validates:
+    - Upload blob with X-Parent header
+    - Returns 201 with standard RFC 8620 fields
+    - S3 object has Parent tag with correct value
+    - DynamoDB blob record has parent field with correct value
+    """
+    print()
+    print("Testing Blob Upload with X-Parent Header...")
+
+    session = client.jmap_session
+
+    if not session.upload_url:
+        results.record_fail("Session has upload_url", "upload_url not in session")
+        return
+
+    try:
+        account_id = client.account_id
+    except Exception as e:
+        results.record_fail("X-Parent upload request", f"No account ID: {e}")
+        return
+
+    upload_endpoint = session.upload_url.replace("{accountId}", account_id)
+    test_content = b"Test blob content with X-Parent header for RFC 8620 compliance"
+    x_parent_value = "my-folder/subfolder"
+    headers = {
+        "Authorization": f"Bearer {config.token}",
+        "Content-Type": "application/octet-stream",
+        "X-Parent": x_parent_value,
+    }
+
+    try:
+        response = requests.post(
+            upload_endpoint, headers=headers, data=test_content, timeout=30
+        )
+    except requests.RequestException as e:
+        results.record_fail("X-Parent blob upload request", str(e))
+        return
+
+    # Test: HTTP 201 response
+    if response.status_code == 201:
+        results.record_pass("X-Parent blob upload returns 201")
+    else:
+        results.record_fail(
+            "X-Parent blob upload returns 201", f"Got HTTP {response.status_code}: {response.text}"
+        )
+        return
+
+    # Parse JSON response
+    try:
+        response_data = response.json()
+    except Exception as e:
+        results.record_fail("X-Parent blob upload returns valid JSON", str(e))
+        return
+
+    blob_id = response_data.get("blobId")
+    if not blob_id:
+        results.record_fail("X-Parent blob upload has blobId", "No blobId in response")
+        return
+
+    results.record_pass("X-Parent blob upload has blobId", blob_id)
+
+    # Verify S3 tag
+    if not config.blob_bucket:
+        results.record_fail("S3 Parent tag verification", "BLOB_BUCKET not configured")
+    else:
+        try:
+            tags = get_s3_tags(config.blob_bucket, account_id, blob_id, config.region)
+            if tags.get("Parent") == x_parent_value:
+                results.record_pass("S3 object has Parent tag", f"Parent={x_parent_value}")
+            else:
+                results.record_fail(
+                    "S3 object has Parent tag",
+                    f"Expected Parent='{x_parent_value}', got tags: {tags}",
+                )
+        except Exception as e:
+            results.record_fail("S3 Parent tag verification", str(e))
+
+    # Verify DynamoDB record
+    if not config.dynamodb_table:
+        results.record_fail("DynamoDB parent field verification", "DYNAMODB_TABLE not configured")
+    else:
+        try:
+            item = get_dynamodb_blob(config.dynamodb_table, account_id, blob_id, config.region)
+            if item is None:
+                results.record_fail("DynamoDB parent field verification", "Blob record not found")
+            elif item.get("parent") == x_parent_value:
+                results.record_pass("DynamoDB record has parent field", f"parent={x_parent_value}")
+            else:
+                results.record_fail(
+                    "DynamoDB record has parent field",
+                    f"Expected parent='{x_parent_value}', got: {item.get('parent')}",
+                )
+        except Exception as e:
+            results.record_fail("DynamoDB parent field verification", str(e))
+
+
+def test_blob_upload_invalid_x_parent(client: Client, config: Config, results: TestResult):
+    """
+    Test 9: Blob Upload with Invalid X-Parent Header
+
+    Validates:
+    - Upload blob with invalid X-Parent (contains XSS attempt)
+    - Returns 400 Bad Request
+    - Error type is invalidArguments
+    """
+    print()
+    print("Testing Blob Upload with Invalid X-Parent Header...")
+
+    session = client.jmap_session
+
+    if not session.upload_url:
+        results.record_fail("Session has upload_url", "upload_url not in session")
+        return
+
+    try:
+        account_id = client.account_id
+    except Exception as e:
+        results.record_fail("Invalid X-Parent test", f"No account ID: {e}")
+        return
+
+    upload_endpoint = session.upload_url.replace("{accountId}", account_id)
+    test_content = b"Test blob with invalid X-Parent"
+    invalid_x_parent = "<script>alert(1)</script>"
+    headers = {
+        "Authorization": f"Bearer {config.token}",
+        "Content-Type": "application/octet-stream",
+        "X-Parent": invalid_x_parent,
+    }
+
+    try:
+        response = requests.post(
+            upload_endpoint, headers=headers, data=test_content, timeout=30
+        )
+    except requests.RequestException as e:
+        results.record_fail("Invalid X-Parent upload request", str(e))
+        return
+
+    # Test: HTTP 400 response
+    if response.status_code == 400:
+        results.record_pass("Invalid X-Parent upload returns 400")
+    else:
+        results.record_fail(
+            "Invalid X-Parent upload returns 400",
+            f"Got HTTP {response.status_code}: {response.text}",
+        )
+        return
+
+    # Test: Error type is invalidArguments
+    try:
+        response_data = response.json()
+        error_type = response_data.get("type")
+        if error_type == "invalidArguments":
+            results.record_pass("Error type is invalidArguments")
+        else:
+            results.record_fail(
+                "Error type is invalidArguments",
+                f"Got type: {error_type}",
+            )
+    except Exception as e:
+        results.record_fail("Parse error response", str(e))
+
+
+def test_blob_upload_x_parent_too_long(client: Client, config: Config, results: TestResult):
+    """
+    Test 10: Blob Upload with X-Parent Exceeding Max Length
+
+    Validates:
+    - Upload blob with X-Parent of 129 characters (max is 128)
+    - Returns 400 Bad Request
+    - Error type is invalidArguments
+    """
+    print()
+    print("Testing Blob Upload with X-Parent Exceeding Max Length...")
+
+    session = client.jmap_session
+
+    if not session.upload_url:
+        results.record_fail("Session has upload_url", "upload_url not in session")
+        return
+
+    try:
+        account_id = client.account_id
+    except Exception as e:
+        results.record_fail("X-Parent too long test", f"No account ID: {e}")
+        return
+
+    upload_endpoint = session.upload_url.replace("{accountId}", account_id)
+    test_content = b"Test blob with too long X-Parent"
+    # Create a 129-character X-Parent value (exceeds 128 max)
+    too_long_x_parent = "a" * 129
+    headers = {
+        "Authorization": f"Bearer {config.token}",
+        "Content-Type": "application/octet-stream",
+        "X-Parent": too_long_x_parent,
+    }
+
+    try:
+        response = requests.post(
+            upload_endpoint, headers=headers, data=test_content, timeout=30
+        )
+    except requests.RequestException as e:
+        results.record_fail("X-Parent too long upload request", str(e))
+        return
+
+    # Test: HTTP 400 response
+    if response.status_code == 400:
+        results.record_pass("X-Parent too long upload returns 400")
+    else:
+        results.record_fail(
+            "X-Parent too long upload returns 400",
+            f"Got HTTP {response.status_code}: {response.text}",
+        )
+        return
+
+    # Test: Error type is invalidArguments
+    try:
+        response_data = response.json()
+        error_type = response_data.get("type")
+        if error_type == "invalidArguments":
+            results.record_pass("Error type is invalidArguments")
+        else:
+            results.record_fail(
+                "Error type is invalidArguments",
+                f"Got type: {error_type}",
+            )
+    except Exception as e:
+        results.record_fail("Parse error response", str(e))
+
+
+def test_blob_upload_without_x_parent(client: Client, config: Config, results: TestResult):
+    """
+    Test 11: Blob Upload without X-Parent Header
+
+    Validates:
+    - Upload blob without X-Parent header
+    - Returns 201 with standard RFC 8620 fields
+    - S3 object does NOT have Parent tag
+    - DynamoDB blob record does NOT have parent field
+    """
+    print()
+    print("Testing Blob Upload without X-Parent Header (verify no Parent in storage)...")
+
+    session = client.jmap_session
+
+    if not session.upload_url:
+        results.record_fail("Session has upload_url", "upload_url not in session")
+        return
+
+    try:
+        account_id = client.account_id
+    except Exception as e:
+        results.record_fail("No X-Parent upload request", f"No account ID: {e}")
+        return
+
+    upload_endpoint = session.upload_url.replace("{accountId}", account_id)
+    test_content = b"Test blob content WITHOUT X-Parent header for storage verification"
+    headers = {
+        "Authorization": f"Bearer {config.token}",
+        "Content-Type": "application/octet-stream",
+        # No X-Parent header
+    }
+
+    try:
+        response = requests.post(
+            upload_endpoint, headers=headers, data=test_content, timeout=30
+        )
+    except requests.RequestException as e:
+        results.record_fail("No X-Parent blob upload request", str(e))
+        return
+
+    # Test: HTTP 201 response
+    if response.status_code == 201:
+        results.record_pass("No X-Parent blob upload returns 201")
+    else:
+        results.record_fail(
+            "No X-Parent blob upload returns 201", f"Got HTTP {response.status_code}: {response.text}"
+        )
+        return
+
+    # Parse JSON response
+    try:
+        response_data = response.json()
+    except Exception as e:
+        results.record_fail("No X-Parent blob upload returns valid JSON", str(e))
+        return
+
+    blob_id = response_data.get("blobId")
+    if not blob_id:
+        results.record_fail("No X-Parent blob upload has blobId", "No blobId in response")
+        return
+
+    results.record_pass("No X-Parent blob upload has blobId", blob_id)
+
+    # Verify S3 tag is NOT present
+    if not config.blob_bucket:
+        results.record_fail("S3 no Parent tag verification", "BLOB_BUCKET not configured")
+    else:
+        try:
+            tags = get_s3_tags(config.blob_bucket, account_id, blob_id, config.region)
+            if "Parent" not in tags:
+                results.record_pass("S3 object does NOT have Parent tag")
+            else:
+                results.record_fail(
+                    "S3 object does NOT have Parent tag",
+                    f"Unexpected Parent tag found: {tags.get('Parent')}",
+                )
+        except Exception as e:
+            results.record_fail("S3 no Parent tag verification", str(e))
+
+    # Verify DynamoDB record does NOT have parent field
+    if not config.dynamodb_table:
+        results.record_fail("DynamoDB no parent field verification", "DYNAMODB_TABLE not configured")
+    else:
+        try:
+            item = get_dynamodb_blob(config.dynamodb_table, account_id, blob_id, config.region)
+            if item is None:
+                results.record_fail("DynamoDB no parent field verification", "Blob record not found")
+            elif "parent" not in item:
+                results.record_pass("DynamoDB record does NOT have parent field")
+            else:
+                results.record_fail(
+                    "DynamoDB record does NOT have parent field",
+                    f"Unexpected parent field found: {item.get('parent')}",
+                )
+        except Exception as e:
+            results.record_fail("DynamoDB no parent field verification", str(e))
+
+
 def print_summary(results: TestResult):
     """Print test summary."""
     print()
@@ -705,11 +1068,11 @@ def main():
     print("JMAP Protocol Compliance Tests (jmapc)")
     print("=" * 40)
 
-    host, token = get_config()
+    config = get_config()
     results = TestResult()
 
     # Test 1: Session Discovery via jmapc Client
-    client = test_client_connection(host, token, results)
+    client = test_client_connection(config.host, config.token, results)
 
     if client:
         # Test 2: Core/echo
@@ -719,16 +1082,28 @@ def main():
         test_email_query(client, results)
 
         # Test 4: Blob Upload
-        test_blob_upload(client, token, results)
+        test_blob_upload(client, config.token, results)
 
         # Test 5: Blob Download
-        test_blob_download(client, token, results)
+        test_blob_download(client, config.token, results)
 
         # Test 6: Blob Download Byte Range
-        test_blob_download_byte_range(client, token, results)
+        test_blob_download_byte_range(client, config.token, results)
 
         # Test 7: Blob Download Cross-Account Access
-        test_blob_download_cross_account(client, token, results)
+        test_blob_download_cross_account(client, config.token, results)
+
+        # Test 8: Blob Upload with X-Parent Header
+        test_blob_upload_with_x_parent(client, config, results)
+
+        # Test 9: Blob Upload with Invalid X-Parent Header
+        test_blob_upload_invalid_x_parent(client, config, results)
+
+        # Test 10: Blob Upload with X-Parent Exceeding Max Length
+        test_blob_upload_x_parent_too_long(client, config, results)
+
+        # Test 11: Blob Upload without X-Parent (verify no Parent in storage)
+        test_blob_upload_without_x_parent(client, config, results)
 
     # Print summary
     print_summary(results)

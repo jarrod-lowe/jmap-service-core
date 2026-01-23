@@ -1,3 +1,4 @@
 jmapc
 requests
 pyyaml
+boto3
