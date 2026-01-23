@@ -15,6 +15,13 @@ Use the brainstorming superpower when doing design of new features.
 
 Do not write code to work around things that should be errors. For example: we define things like the environment variables on a lambda - so we shouldn't accept a variable not being set and just not do things.
 
+## Reference Documents
+
+The `docs/` directory contains the official JMAP RFCs for reference:
+
+- `docs/rfc8620.txt` - RFC 8620: JMAP Core protocol specification
+- `docs/rfc8621.txt` - RFC 8621: JMAP for Mail specification
+
 ## Build and Development Commands
 
 We will use a Makefile for presenting all the operations to the use (such as plans, cleans, applies, etc). Terraform will be used for infrastructure. See `../ses-mail` for an example of a project using those.
