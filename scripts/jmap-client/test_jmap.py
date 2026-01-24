@@ -22,7 +22,9 @@ import requests
 from jmapc import Client, Comparator
 from jmapc.methods import CoreEcho, EmailGet, EmailQuery
 
+from test_changes import test_email_changes, test_mailbox_changes
 from test_email import setup_query_test_data, test_email_import_and_get
+from test_thread import test_thread_operations
 
 
 class Colors:
@@ -1545,6 +1547,15 @@ def main():
 
             # Test 19: Stable sort order
             test_email_query_stable_sort(client, query_test_data, results)
+
+        # Thread/get E2E Tests (RFC 8621 §3)
+        test_thread_operations(client, config, results)
+
+        # Email/changes E2E Tests (RFC 8620 §5.2)
+        test_email_changes(client, config, results)
+
+        # Mailbox/changes E2E Tests (RFC 8620 §5.2)
+        test_mailbox_changes(client, config, results)
 
     # Print summary
     print_summary(results)
