@@ -22,7 +22,7 @@ import requests
 from jmapc import Client, Comparator
 from jmapc.methods import CoreEcho, EmailGet, EmailQuery
 
-from test_changes import test_email_changes, test_mailbox_changes
+from test_changes import test_email_changes, test_mailbox_changes, test_thread_changes
 from test_email import setup_query_test_data, test_email_import_and_get
 from test_email_set import (
     test_email_set_mailbox_changes,
@@ -1555,6 +1555,9 @@ def main():
 
         # Thread/get E2E Tests (RFC 8621 §3)
         test_thread_operations(client, config, results)
+
+        # Thread/changes E2E Tests (RFC 8620 §5.2 and RFC 8621 §3.2)
+        test_thread_changes(client, config, results)
 
         # Email/changes E2E Tests (RFC 8620 §5.2)
         test_email_changes(client, config, results)
