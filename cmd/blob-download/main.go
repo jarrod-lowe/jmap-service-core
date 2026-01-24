@@ -244,24 +244,27 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 	}, nil
 }
 
-// extractAccountID extracts account ID from path parameter or JWT claims
+// extractAccountID extracts account ID using authoritative API Gateway signals.
+// - IAM auth: Identity.UserArn or Identity.Caller is populated → use path param
+// - Cognito auth: Authorizer["claims"]["sub"] is populated → use JWT sub claim
+// These fields are populated by API Gateway and cannot be spoofed by clients.
 func extractAccountID(request events.APIGatewayProxyRequest) (string, error) {
-	// For IAM auth routes (/download-iam/), use path parameter
-	if accountID, ok := request.PathParameters["accountId"]; ok && accountID != "" {
-		// Check if this is an IAM auth route (no Cognito claims)
-		if request.RequestContext.Authorizer == nil {
-			return accountID, nil
+	identity := request.RequestContext.Identity
+
+	// IAM auth: API Gateway populates Identity.UserArn and/or Identity.Caller
+	// These fields cannot be spoofed by the client
+	if identity.UserArn != "" || identity.Caller != "" {
+		accountID, ok := request.PathParameters["accountId"]
+		if !ok || accountID == "" {
+			return "", fmt.Errorf("missing accountId path parameter for IAM auth")
 		}
-		// If there are claims, we're on Cognito route - use JWT sub
-		if _, hasClaims := request.RequestContext.Authorizer["claims"]; !hasClaims {
-			return accountID, nil
-		}
+		return accountID, nil
 	}
 
-	// Fall back to Cognito JWT claims
+	// Cognito auth: API Gateway populates Authorizer with claims
 	authorizer := request.RequestContext.Authorizer
 	if authorizer == nil {
-		return "", fmt.Errorf("no authorizer context")
+		return "", fmt.Errorf("no authentication context (neither IAM nor Cognito)")
 	}
 
 	claims, ok := authorizer["claims"].(map[string]any)

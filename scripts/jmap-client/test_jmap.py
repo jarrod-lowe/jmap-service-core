@@ -22,6 +22,8 @@ import requests
 from jmapc import Client
 from jmapc.methods import CoreEcho, EmailQuery
 
+from test_email import test_email_import_and_get
+
 
 class Colors:
     """ANSI color codes for terminal output."""
@@ -1104,6 +1106,9 @@ def main():
 
         # Test 11: Blob Upload without X-Parent (verify no Parent in storage)
         test_blob_upload_without_x_parent(client, config, results)
+
+        # Test 12: Email/import and Email/get round-trip
+        test_email_import_and_get(client, config, results)
 
     # Print summary
     print_summary(results)

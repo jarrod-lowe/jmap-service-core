@@ -29,6 +29,19 @@ resource "aws_ssm_parameter" "api_url" {
   }
 }
 
+resource "aws_ssm_parameter" "api_gateway_invoke_url" {
+  name        = "/${local.resource_prefix}/${var.environment}/api-gateway-invoke-url"
+  type        = "String"
+  value       = aws_api_gateway_stage.v1.invoke_url
+  description = "Direct API Gateway invoke URL for IAM-authenticated plugin calls"
+
+  tags = {
+    Name        = "${local.resource_prefix}-api-gateway-invoke-url-${var.environment}"
+    Environment = var.environment
+    Service     = "jmap-service"
+  }
+}
+
 resource "aws_ssm_parameter" "dynamodb_table_name" {
   name        = "/${local.resource_prefix}/${var.environment}/dynamodb-table-name"
   type        = "String"

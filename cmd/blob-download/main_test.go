@@ -604,7 +604,7 @@ func TestDownload_MissingBlobId(t *testing.T) {
 	}
 }
 
-// Test 11: IAM auth route uses path accountId
+// Test 11: IAM auth uses path accountId (detected via Identity.UserArn)
 func TestDownload_IAMAuthUsesPathAccountId(t *testing.T) {
 	blob := &BlobRecord{
 		BlobID:      "blob-123",
@@ -620,15 +620,18 @@ func TestDownload_IAMAuthUsesPathAccountId(t *testing.T) {
 	secrets := &mockSecretsReader{}
 	setupTestDeps(db, signer, secrets)
 
-	// IAM auth - no Cognito authorizer/claims
+	// IAM auth - detected via Identity.UserArn (authoritative signal)
 	request := events.APIGatewayProxyRequest{
 		PathParameters: map[string]string{
 			"accountId": "user-456",
 			"blobId":    "blob-123",
 		},
 		RequestContext: events.APIGatewayProxyRequestContext{
-			RequestID:  "req-abc",
-			Authorizer: nil, // No authorizer for IAM
+			RequestID: "req-abc",
+			Identity: events.APIGatewayRequestIdentity{
+				UserArn: "arn:aws:iam::123456789012:role/ingestion-role",
+				Caller:  "AROAEXAMPLE:session",
+			},
 		},
 	}
 
@@ -874,6 +877,195 @@ func TestDownload_CompositeBlobID_InvalidFormat(t *testing.T) {
 				t.Errorf("expected error type 'invalidArguments', got '%s'", errResp.Type)
 			}
 		})
+	}
+}
+
+// =============================================================================
+// extractAccountID unit tests - testing IAM vs Cognito auth detection
+// Uses authoritative API Gateway signals (Identity fields for IAM, Authorizer claims for Cognito)
+// =============================================================================
+
+// Test: IAM auth detected by Identity.UserArn - uses path parameter
+func TestExtractAccountID_IAMAuth_UsesPathParam(t *testing.T) {
+	request := events.APIGatewayProxyRequest{
+		PathParameters: map[string]string{"accountId": "test-account-123"},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			Identity: events.APIGatewayRequestIdentity{
+				UserArn: "arn:aws:iam::123456789012:role/lambda-role",
+				Caller:  "AROAEXAMPLE:session-name",
+			},
+		},
+	}
+
+	accountID, err := extractAccountID(request)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if accountID != "test-account-123" {
+		t.Errorf("expected 'test-account-123', got '%s'", accountID)
+	}
+}
+
+// Test: IAM auth with only Caller field (no UserArn) - still IAM
+func TestExtractAccountID_IAMAuth_CallerOnly(t *testing.T) {
+	request := events.APIGatewayProxyRequest{
+		PathParameters: map[string]string{"accountId": "test-account-456"},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			Identity: events.APIGatewayRequestIdentity{
+				Caller: "AROAEXAMPLE:session-name",
+			},
+		},
+	}
+
+	accountID, err := extractAccountID(request)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if accountID != "test-account-456" {
+		t.Errorf("expected 'test-account-456', got '%s'", accountID)
+	}
+}
+
+// Test: IAM auth with Authorizer populated (but no claims) - still uses path param
+func TestExtractAccountID_IAMAuth_WithAuthorizerNoClaims(t *testing.T) {
+	request := events.APIGatewayProxyRequest{
+		PathParameters: map[string]string{"accountId": "test-account-123"},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			Identity: events.APIGatewayRequestIdentity{
+				UserArn: "arn:aws:iam::123456789012:role/lambda-role",
+			},
+			Authorizer: map[string]interface{}{
+				"principalId": "something",
+			},
+		},
+	}
+
+	accountID, err := extractAccountID(request)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if accountID != "test-account-123" {
+		t.Errorf("expected 'test-account-123', got '%s'", accountID)
+	}
+}
+
+// Test: IAM auth missing path parameter should error
+func TestExtractAccountID_IAMAuth_MissingPathParam(t *testing.T) {
+	request := events.APIGatewayProxyRequest{
+		PathParameters: map[string]string{}, // No accountId
+		RequestContext: events.APIGatewayProxyRequestContext{
+			Identity: events.APIGatewayRequestIdentity{
+				UserArn: "arn:aws:iam::123456789012:role/lambda-role",
+			},
+		},
+	}
+
+	_, err := extractAccountID(request)
+	if err == nil {
+		t.Error("expected error for missing accountId on IAM auth")
+	}
+	if !strings.Contains(err.Error(), "missing accountId") {
+		t.Errorf("expected error about missing accountId, got: %v", err)
+	}
+}
+
+// Test: Cognito auth detected by Authorizer claims - uses JWT sub claim
+func TestExtractAccountID_CognitoAuth_UsesJWTClaims(t *testing.T) {
+	request := events.APIGatewayProxyRequest{
+		PathParameters: map[string]string{"accountId": "path-should-be-ignored"},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			Identity: events.APIGatewayRequestIdentity{}, // Empty - no IAM
+			Authorizer: map[string]interface{}{
+				"claims": map[string]interface{}{
+					"sub": "cognito-user-id",
+				},
+			},
+		},
+	}
+
+	accountID, err := extractAccountID(request)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if accountID != "cognito-user-id" {
+		t.Errorf("expected 'cognito-user-id', got '%s'", accountID)
+	}
+}
+
+// Test: No auth (neither IAM nor Cognito) - should error
+func TestExtractAccountID_NoAuth_ReturnsError(t *testing.T) {
+	request := events.APIGatewayProxyRequest{
+		PathParameters: map[string]string{"accountId": "test-account"},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			Identity:   events.APIGatewayRequestIdentity{}, // Empty
+			Authorizer: nil,
+		},
+	}
+
+	_, err := extractAccountID(request)
+	if err == nil {
+		t.Error("expected error for no authentication context")
+	}
+	if !strings.Contains(err.Error(), "no authentication context") {
+		t.Errorf("expected error about no authentication context, got: %v", err)
+	}
+}
+
+// Test: Cognito auth without sub claim should error
+func TestExtractAccountID_CognitoAuth_NoSubClaim(t *testing.T) {
+	request := events.APIGatewayProxyRequest{
+		PathParameters: map[string]string{"accountId": "account-123"},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			Identity: events.APIGatewayRequestIdentity{}, // Empty - no IAM
+			Authorizer: map[string]interface{}{
+				"claims": map[string]interface{}{
+					"email": "user@example.com", // No sub claim
+				},
+			},
+		},
+	}
+
+	_, err := extractAccountID(request)
+	if err == nil {
+		t.Error("expected error for Cognito auth without sub claim")
+	}
+}
+
+// Test: Cognito auth with empty sub claim should error
+func TestExtractAccountID_CognitoAuth_EmptySubClaim(t *testing.T) {
+	request := events.APIGatewayProxyRequest{
+		PathParameters: map[string]string{"accountId": "account-123"},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			Identity: events.APIGatewayRequestIdentity{}, // Empty - no IAM
+			Authorizer: map[string]interface{}{
+				"claims": map[string]interface{}{
+					"sub": "", // Empty sub
+				},
+			},
+		},
+	}
+
+	_, err := extractAccountID(request)
+	if err == nil {
+		t.Error("expected error for empty sub claim")
+	}
+}
+
+// Test: Authorizer with no claims key should error (no IAM identity)
+func TestExtractAccountID_AuthorizerWithoutClaims(t *testing.T) {
+	request := events.APIGatewayProxyRequest{
+		PathParameters: map[string]string{"accountId": "account-123"},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			Identity: events.APIGatewayRequestIdentity{}, // Empty - no IAM
+			Authorizer: map[string]interface{}{
+				"principalId": "some-principal", // No claims key
+			},
+		},
+	}
+
+	_, err := extractAccountID(request)
+	if err == nil {
+		t.Error("expected error for authorizer without claims")
 	}
 }
 
