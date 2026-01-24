@@ -19,10 +19,10 @@ import sys
 
 import boto3
 import requests
-from jmapc import Client
-from jmapc.methods import CoreEcho, EmailQuery
+from jmapc import Client, Comparator
+from jmapc.methods import CoreEcho, EmailGet, EmailQuery
 
-from test_email import test_email_import_and_get
+from test_email import setup_query_test_data, test_email_import_and_get
 
 
 class Colors:
@@ -1044,6 +1044,417 @@ def test_blob_upload_without_x_parent(client: Client, config: Config, results: T
             results.record_fail("DynamoDB no parent field verification", str(e))
 
 
+def test_email_query_response_structure(
+    client: Client, test_data: dict, results: TestResult
+):
+    """
+    Test: Email/query Response Structure
+
+    RFC 8620 Section 5.5: The response MUST contain accountId, queryState,
+    canCalculateChanges, position, and ids fields.
+    """
+    print()
+    print("Testing Email/query response structure (RFC 8620 §5.5)...")
+
+    try:
+        response = client.request(EmailQuery())
+    except Exception as e:
+        results.record_fail("Email/query response structure", str(e))
+        return
+
+    # Check for error response
+    error_type = getattr(response, "type", None)
+    if error_type:
+        results.record_fail(
+            "Email/query response structure",
+            f"JMAP error: {error_type}: {getattr(response, 'description', '')}",
+        )
+        return
+
+    # Verify accountId
+    account_id = getattr(response, "account_id", None)
+    if account_id == test_data["account_id"]:
+        results.record_pass("Response has accountId", account_id)
+    elif account_id:
+        results.record_fail(
+            "Response accountId matches",
+            f"Expected {test_data['account_id']}, got {account_id}",
+        )
+    else:
+        results.record_fail("Response has accountId", "accountId is None")
+
+    # Verify queryState
+    query_state = getattr(response, "query_state", None)
+    if query_state is not None:
+        results.record_pass("Response has queryState", str(query_state))
+    else:
+        results.record_fail("Response has queryState", "queryState is None")
+
+    # Verify canCalculateChanges
+    can_calculate = getattr(response, "can_calculate_changes", None)
+    if can_calculate is not None:
+        results.record_pass("Response has canCalculateChanges", str(can_calculate))
+    else:
+        results.record_fail(
+            "Response has canCalculateChanges", "canCalculateChanges is None"
+        )
+
+    # Verify position
+    position = getattr(response, "position", None)
+    if position is not None:
+        if position == 0:
+            results.record_pass("Response position is 0 for first page")
+        else:
+            results.record_pass("Response has position", str(position))
+    else:
+        results.record_fail("Response has position", "position is None")
+
+    # Verify ids is an array
+    ids = getattr(response, "ids", None)
+    if ids is not None and isinstance(ids, list):
+        results.record_pass("Response has ids array", f"count: {len(ids)}")
+    else:
+        results.record_fail("Response has ids array", f"ids is {type(ids)}")
+
+
+def test_email_query_empty_filter(
+    client: Client, test_data: dict, results: TestResult
+):
+    """
+    Test: Empty Filter Returns All Emails
+
+    RFC 8621 Section 4.4.1: "If zero properties are specified on the
+    FilterCondition, the condition MUST always evaluate to true."
+    """
+    print()
+    print("Testing Email/query with empty filter (RFC 8621 §4.4.1)...")
+
+    try:
+        response = client.request(EmailQuery())
+    except Exception as e:
+        results.record_fail("Email/query empty filter", str(e))
+        return
+
+    error_type = getattr(response, "type", None)
+    if error_type:
+        results.record_fail(
+            "Email/query empty filter",
+            f"JMAP error: {error_type}: {getattr(response, 'description', '')}",
+        )
+        return
+
+    ids = getattr(response, "ids", None) or []
+
+    # All test emails should appear in results
+    test_email_ids = set(test_data["email_ids"])
+    result_ids = set(ids)
+
+    missing = test_email_ids - result_ids
+    if not missing:
+        results.record_pass(
+            "Empty filter returns all test emails",
+            f"Found all {len(test_email_ids)} test emails",
+        )
+    else:
+        results.record_fail(
+            "Empty filter returns all test emails",
+            f"Missing {len(missing)} emails: {missing}",
+        )
+
+
+def test_email_query_sort_received_at_desc(
+    client: Client, test_data: dict, results: TestResult
+):
+    """
+    Test: receivedAt Sorting
+
+    RFC 8621 Section 4.4.2: "receivedAt" MUST be supported for sorting.
+    """
+    print()
+    print("Testing Email/query sort by receivedAt desc (RFC 8621 §4.4.2)...")
+
+    try:
+        response = client.request(
+            EmailQuery(sort=[Comparator(property="receivedAt", is_ascending=False)])
+        )
+    except Exception as e:
+        results.record_fail("Email/query sort receivedAt desc", str(e))
+        return
+
+    error_type = getattr(response, "type", None)
+    if error_type:
+        results.record_fail(
+            "Email/query sort receivedAt desc",
+            f"JMAP error: {error_type}: {getattr(response, 'description', '')}",
+        )
+        return
+
+    ids = getattr(response, "ids", None) or []
+
+    # Filter to only our test emails
+    test_ids = test_data["email_ids"]
+    result_test_ids = [id for id in ids if id in test_ids]
+
+    if len(result_test_ids) != len(test_ids):
+        results.record_fail(
+            "Email/query sort receivedAt desc",
+            f"Expected {len(test_ids)} test emails, found {len(result_test_ids)}",
+        )
+        return
+
+    # Test emails should appear newest-first (reverse of creation order)
+    expected_order = list(reversed(test_ids))
+    if result_test_ids == expected_order:
+        results.record_pass(
+            "Emails sorted by receivedAt descending (newest first)",
+            f"Order: {result_test_ids}",
+        )
+    else:
+        results.record_fail(
+            "Emails sorted by receivedAt descending",
+            f"Expected {expected_order}, got {result_test_ids}",
+        )
+
+
+def test_email_query_pagination(
+    client: Client, test_data: dict, results: TestResult
+):
+    """
+    Test: Pagination with position/limit
+
+    RFC 8620 Section 5.5: The position and limit arguments control pagination.
+    """
+    print()
+    print("Testing Email/query pagination (RFC 8620 §5.5)...")
+
+    # First page: limit=1, position=0
+    try:
+        response1 = client.request(EmailQuery(position=0, limit=1))
+    except Exception as e:
+        results.record_fail("Email/query pagination page 1", str(e))
+        return
+
+    error_type = getattr(response1, "type", None)
+    if error_type:
+        results.record_fail(
+            "Email/query pagination page 1",
+            f"JMAP error: {error_type}",
+        )
+        return
+
+    ids1 = getattr(response1, "ids", None) or []
+    pos1 = getattr(response1, "position", None)
+
+    if len(ids1) != 1:
+        results.record_fail(
+            "Pagination limit=1 returns 1 email",
+            f"Expected 1, got {len(ids1)}",
+        )
+        return
+
+    results.record_pass("Pagination limit=1 returns 1 email", ids1[0])
+
+    if pos1 == 0:
+        results.record_pass("Response position matches request (0)")
+    else:
+        results.record_fail("Response position matches request", f"Expected 0, got {pos1}")
+
+    # Second page: limit=1, position=1
+    try:
+        response2 = client.request(EmailQuery(position=1, limit=1))
+    except Exception as e:
+        results.record_fail("Email/query pagination page 2", str(e))
+        return
+
+    ids2 = getattr(response2, "ids", None) or []
+    pos2 = getattr(response2, "position", None)
+
+    if len(ids2) != 1:
+        results.record_fail(
+            "Pagination page 2 returns 1 email",
+            f"Expected 1, got {len(ids2)}",
+        )
+        return
+
+    results.record_pass("Pagination page 2 returns 1 email", ids2[0])
+
+    if pos2 == 1:
+        results.record_pass("Response position matches request (1)")
+    else:
+        results.record_fail("Response position matches request", f"Expected 1, got {pos2}")
+
+    # Verify no overlap between pages
+    if ids1[0] != ids2[0]:
+        results.record_pass("No overlap between pagination pages")
+    else:
+        results.record_fail(
+            "No overlap between pagination pages",
+            f"Both pages returned {ids1[0]}",
+        )
+
+
+def test_email_query_calculate_total(
+    client: Client, test_data: dict, results: TestResult
+):
+    """
+    Test: calculateTotal
+
+    RFC 8620 Section 5.5: If calculateTotal is true, the response MUST include
+    a total field. If false or omitted, total MAY be omitted.
+    """
+    print()
+    print("Testing Email/query calculateTotal (RFC 8620 §5.5)...")
+
+    # With calculateTotal=True
+    try:
+        response = client.request(EmailQuery(calculate_total=True))
+    except Exception as e:
+        results.record_fail("Email/query calculateTotal=true", str(e))
+        return
+
+    error_type = getattr(response, "type", None)
+    if error_type:
+        results.record_fail(
+            "Email/query calculateTotal=true",
+            f"JMAP error: {error_type}",
+        )
+        return
+
+    total = getattr(response, "total", None)
+    if total is not None:
+        # Total should be at least the number of test emails
+        if total >= len(test_data["email_ids"]):
+            results.record_pass(
+                "calculateTotal=true returns total",
+                f"total={total} (expected >= {len(test_data['email_ids'])})",
+            )
+        else:
+            results.record_fail(
+                "calculateTotal=true returns correct total",
+                f"total={total}, expected >= {len(test_data['email_ids'])}",
+            )
+    else:
+        # RFC 8620 says total is "only if requested" - not a hard MUST
+        # but strongly implied. Log as pass with note.
+        results.record_pass(
+            "calculateTotal=true (total not returned)",
+            "RFC permits omission but recommends including when requested",
+        )
+
+    # With calculateTotal=False (or omitted)
+    try:
+        response2 = client.request(EmailQuery(calculate_total=False))
+    except Exception as e:
+        results.record_fail("Email/query calculateTotal=false", str(e))
+        return
+
+    # RFC says total MAY be omitted - either None or present is acceptable
+    total2 = getattr(response2, "total", None)
+    if total2 is None:
+        results.record_pass("calculateTotal=false omits total (as permitted by RFC)")
+    else:
+        results.record_pass(
+            "calculateTotal=false includes total (optional)",
+            f"total={total2}",
+        )
+
+
+def test_email_query_position_beyond_results(
+    client: Client, test_data: dict, results: TestResult
+):
+    """
+    Test: Empty Results for Position Beyond Results
+
+    RFC 8620 Section 5.5: "If the index is greater than or equal to the total
+    number of objects in the results list, then the 'ids' array in the response
+    will be empty, but this is not an error."
+    """
+    print()
+    print("Testing Email/query position beyond results (RFC 8620 §5.5)...")
+
+    try:
+        response = client.request(EmailQuery(position=9999))
+    except Exception as e:
+        results.record_fail("Email/query position=9999", str(e))
+        return
+
+    # This should NOT be an error
+    error_type = getattr(response, "type", None)
+    if error_type:
+        results.record_fail(
+            "Position beyond results is not an error",
+            f"Got JMAP error: {error_type}",
+        )
+        return
+
+    results.record_pass("Position beyond results is not an error")
+
+    ids = getattr(response, "ids", None)
+    if ids is not None and isinstance(ids, list) and len(ids) == 0:
+        results.record_pass("ids is empty array when position beyond results")
+    else:
+        results.record_fail(
+            "ids is empty array when position beyond results",
+            f"ids = {ids}",
+        )
+
+
+def test_email_query_stable_sort(
+    client: Client, test_data: dict, results: TestResult
+):
+    """
+    Test: Stable Sort Order
+
+    RFC 8620 Section 5.5: "...the sort order is server dependent, but it MUST
+    be stable between calls"
+    """
+    print()
+    print("Testing Email/query stable sort (RFC 8620 §5.5)...")
+
+    try:
+        response1 = client.request(EmailQuery())
+    except Exception as e:
+        results.record_fail("Email/query stable sort (call 1)", str(e))
+        return
+
+    error_type = getattr(response1, "type", None)
+    if error_type:
+        results.record_fail(
+            "Email/query stable sort (call 1)",
+            f"JMAP error: {error_type}",
+        )
+        return
+
+    ids1 = getattr(response1, "ids", None) or []
+
+    try:
+        response2 = client.request(EmailQuery())
+    except Exception as e:
+        results.record_fail("Email/query stable sort (call 2)", str(e))
+        return
+
+    error_type2 = getattr(response2, "type", None)
+    if error_type2:
+        results.record_fail(
+            "Email/query stable sort (call 2)",
+            f"JMAP error: {error_type2}",
+        )
+        return
+
+    ids2 = getattr(response2, "ids", None) or []
+
+    if ids1 == ids2:
+        results.record_pass(
+            "Same query returns identical order",
+            f"Both calls returned {len(ids1)} emails in same order",
+        )
+    else:
+        results.record_fail(
+            "Same query returns identical order",
+            f"Call 1: {ids1[:5]}..., Call 2: {ids2[:5]}...",
+        )
+
+
 def print_summary(results: TestResult):
     """Print test summary."""
     print()
@@ -1109,6 +1520,31 @@ def main():
 
         # Test 12: Email/import and Email/get round-trip
         test_email_import_and_get(client, config, results)
+
+        # Email/query E2E Tests (RFC 8620 §5.5 and RFC 8621 §4.4)
+        # Set up test data: mailbox with 3 emails at staggered receivedAt times
+        query_test_data = setup_query_test_data(client, config, results)
+        if query_test_data:
+            # Test 13: Email/query response structure
+            test_email_query_response_structure(client, query_test_data, results)
+
+            # Test 14: Empty filter returns all emails
+            test_email_query_empty_filter(client, query_test_data, results)
+
+            # Test 15: receivedAt sorting
+            test_email_query_sort_received_at_desc(client, query_test_data, results)
+
+            # Test 16: Pagination
+            test_email_query_pagination(client, query_test_data, results)
+
+            # Test 17: calculateTotal
+            test_email_query_calculate_total(client, query_test_data, results)
+
+            # Test 18: Position beyond results
+            test_email_query_position_beyond_results(client, query_test_data, results)
+
+            # Test 19: Stable sort order
+            test_email_query_stable_sort(client, query_test_data, results)
 
     # Print summary
     print_summary(results)

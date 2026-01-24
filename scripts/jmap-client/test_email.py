@@ -5,7 +5,7 @@ Tests for Email/import and Email/get methods per RFC 8621.
 """
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import requests
 from jmapc import Client
@@ -471,3 +471,164 @@ This is the test email body content for JMAP import verification.
             )
     else:
         results.record_fail("Email preview matches", "No preview field")
+
+
+def setup_query_test_data(client: Client, config, results) -> dict | None:
+    """
+    Set up test data for Email/query tests.
+
+    Creates a test mailbox and imports 3 emails with staggered receivedAt times.
+    Returns dict with mailbox_id, email_ids (oldest to newest), and received_ats.
+    """
+    print()
+    print("Setting up Email/query test data...")
+
+    session = client.jmap_session
+
+    try:
+        account_id = client.account_id
+    except Exception as e:
+        results.record_fail("Query test data setup", f"No account ID: {e}")
+        return None
+
+    # Create test mailbox
+    mailbox_id = create_test_mailbox(
+        session.api_url, config.token, account_id, results
+    )
+    if not mailbox_id:
+        return None
+
+    email_ids = []
+    received_ats = []
+
+    # Import 3 emails with 1-second gaps for clear ordering
+    for i in range(3):
+        unique_id = str(uuid.uuid4())
+        message_id = f"<query-test-{unique_id}@jmap-test.example>"
+
+        # Calculate receivedAt - oldest first (i=0 is oldest)
+        received_at = datetime.now(timezone.utc) - timedelta(seconds=(2 - i))
+        received_at_str = received_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+        received_ats.append(received_at_str)
+
+        date_str = received_at.strftime("%a, %d %b %Y %H:%M:%S %z")
+        email_content = f"""From: Query Test {i} <sender{i}@example.com>
+To: Test Recipient <recipient@example.com>
+Subject: Query Test Email {i}
+Date: {date_str}
+Message-ID: {message_id}
+Content-Type: text/plain; charset=utf-8
+
+This is query test email number {i}.
+""".replace("\n", "\r\n")
+
+        # Upload email as blob
+        upload_endpoint = session.upload_url.replace("{accountId}", account_id)
+        headers = {
+            "Authorization": f"Bearer {config.token}",
+            "Content-Type": "message/rfc822",
+        }
+
+        try:
+            upload_response = requests.post(
+                upload_endpoint,
+                headers=headers,
+                data=email_content.encode("utf-8"),
+                timeout=30,
+            )
+            if upload_response.status_code != 201:
+                results.record_fail(
+                    f"Upload query test email {i}",
+                    f"Got HTTP {upload_response.status_code}: {upload_response.text}",
+                )
+                return None
+            upload_data = upload_response.json()
+            blob_id = upload_data.get("blobId")
+            if not blob_id:
+                results.record_fail(f"Upload query test email {i}", "No blobId")
+                return None
+        except Exception as e:
+            results.record_fail(f"Upload query test email {i}", str(e))
+            return None
+
+        # Import email
+        import_call = [
+            "Email/import",
+            {
+                "accountId": account_id,
+                "emails": {
+                    "email": {
+                        "blobId": blob_id,
+                        "mailboxIds": {mailbox_id: True},
+                        "receivedAt": received_at_str,
+                    }
+                },
+            },
+            f"import{i}",
+        ]
+
+        try:
+            import_response = make_jmap_request(
+                session.api_url, config.token, [import_call]
+            )
+        except Exception as e:
+            results.record_fail(f"Import query test email {i}", str(e))
+            return None
+
+        if "methodResponses" not in import_response:
+            results.record_fail(
+                f"Import query test email {i}",
+                f"No methodResponses: {import_response}",
+            )
+            return None
+
+        method_responses = import_response["methodResponses"]
+        if len(method_responses) == 0:
+            results.record_fail(f"Import query test email {i}", "Empty methodResponses")
+            return None
+
+        response_name, response_data, _ = method_responses[0]
+        if response_name == "error":
+            results.record_fail(
+                f"Import query test email {i}",
+                f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
+            )
+            return None
+
+        created = response_data.get("created", {})
+        if "email" not in created:
+            not_created = response_data.get("notCreated", {})
+            if "email" in not_created:
+                error = not_created["email"]
+                results.record_fail(
+                    f"Import query test email {i}",
+                    f"Not created: {error.get('type')}: {error.get('description')}",
+                )
+            else:
+                results.record_fail(
+                    f"Import query test email {i}",
+                    f"No email in created: {response_data}",
+                )
+            return None
+
+        email_id = created["email"].get("id")
+        if not email_id:
+            results.record_fail(
+                f"Import query test email {i}",
+                f"No id in created email: {created['email']}",
+            )
+            return None
+
+        email_ids.append(email_id)
+
+    results.record_pass(
+        "Query test data setup complete",
+        f"mailbox: {mailbox_id}, emails: {len(email_ids)}",
+    )
+
+    return {
+        "mailbox_id": mailbox_id,
+        "email_ids": email_ids,  # Ordered oldest to newest
+        "received_ats": received_ats,  # Ordered oldest to newest
+        "account_id": account_id,
+    }
