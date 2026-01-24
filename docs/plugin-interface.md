@@ -69,6 +69,7 @@ Plugins register themselves by creating a DynamoDB record in the core service's 
 | `pluginId` | String | Unique identifier for the plugin |
 | `capabilities` | Map | JMAP capabilities provided by this plugin |
 | `methods` | Map | Method name to invocation target mapping |
+| `clientPrincipals` | List[String] | IAM role ARNs that this plugin uses to access IAM endpoints (optional) |
 | `registeredAt` | String | RFC3339 timestamp of registration |
 | `version` | String | Plugin version |
 
@@ -354,6 +355,92 @@ Clients can then use any capability advertised in the session.
 3. **Timeouts**: Plugin Lambdas should complete within 25 seconds
 4. **Logging**: Include `requestId` and `accountId` in all log entries for tracing
 5. **Versioning**: Update the `version` field when changing plugin behaviour
+
+## IAM Access Control
+
+Plugins that use IAM-authenticated endpoints must declare their client principals. This enables the core service to enforce an allow-list of authorized callers for machine-to-machine communication.
+
+### Affected Endpoints
+
+IAM access control applies to all IAM-authenticated endpoints:
+
+- `POST /jmap-iam/{accountId}` - JMAP API for machine clients
+- `POST /upload-iam/{accountId}` - Blob upload for machine clients
+- `GET /download-iam/{accountId}/{blobId}` - Blob download for machine clients
+
+### DynamoDB Record Field
+
+Add `clientPrincipals` to your plugin registration:
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `clientPrincipals` | List[String] | IAM role ARNs that this plugin uses to access IAM endpoints |
+
+### Example
+
+```json
+{
+  "pk": "PLUGIN#",
+  "sk": "PLUGIN#ses-ingest",
+  "pluginId": "ses-ingest",
+  "clientPrincipals": [
+    "arn:aws:iam::123456789012:role/SESIngestRole"
+  ],
+  "capabilities": {},
+  "methods": {},
+  "registeredAt": "2025-01-20T10:00:00Z",
+  "version": "1.0.0"
+}
+```
+
+### Terraform Example
+
+```hcl
+resource "aws_dynamodb_table_item" "plugin_registration" {
+  table_name = data.aws_ssm_parameter.jmap_table_name.value
+  hash_key   = "pk"
+  range_key  = "sk"
+
+  item = jsonencode({
+    pk       = { S = "PLUGIN#" }
+    sk       = { S = "PLUGIN#${var.plugin_name}" }
+    pluginId = { S = var.plugin_name }
+    clientPrincipals = {
+      L = [
+        { S = aws_iam_role.ingest_role.arn }
+      ]
+    }
+    # ... other fields
+  })
+}
+```
+
+### Assumed Role Matching
+
+When registering principals, just list the IAM role ARN. The core service automatically handles assumed-role session matching:
+
+- Register: `arn:aws:iam::123456789012:role/MyRole`
+- Callers using `arn:aws:sts::123456789012:assumed-role/MyRole/AnySessionName` will be allowed
+
+No wildcards or special patterns are needed.
+
+### Security Model
+
+1. **Deny by default**: Principals must be registered by a plugin to access IAM endpoints
+2. **Plugin-declared**: Plugins declare their own roles, not core
+3. **Aggregated allow-list**: Core combines all plugin declarations; a principal registered by any plugin can access all IAM endpoints
+4. **Cognito unaffected**: IAM principal checks only apply to IAM-authenticated endpoints; Cognito-authenticated requests are not affected
+
+### Error Response
+
+Requests from unregistered principals receive HTTP 403:
+
+```json
+{
+  "type": "forbidden",
+  "description": "Principal not authorized for IAM access"
+}
+```
 
 ## Go Plugin Development
 

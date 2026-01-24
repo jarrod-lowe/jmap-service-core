@@ -91,3 +91,9 @@ variable "cloudfront_signing_key_max_age_days" {
   type        = number
   default     = 180
 }
+
+variable "iam_client_principals" {
+  description = "IAM role ARNs authorized to access IAM-authenticated endpoints. These principals are registered by the core plugin."
+  type        = list(string)
+  default     = []
+}

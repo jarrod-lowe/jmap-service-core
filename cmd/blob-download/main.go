@@ -22,6 +22,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
+	"github.com/jarrod-lowe/jmap-service-core/internal/db"
+	"github.com/jarrod-lowe/jmap-service-core/internal/plugin"
 )
 
 var (
@@ -129,11 +131,17 @@ type Config struct {
 	SignedURLExpiry    time.Duration
 }
 
+// PrincipalChecker checks if a caller is allowed to access IAM endpoints
+type PrincipalChecker interface {
+	IsAllowedPrincipal(callerARN string) bool
+}
+
 // Dependencies for handler (injectable for testing)
 type Dependencies struct {
 	DB            BlobDB
 	Signer        URLSigner
 	SecretsReader SecretsReader
+	Registry      PrincipalChecker
 	Config        Config
 }
 
@@ -172,6 +180,18 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 			slog.String("error", err.Error()),
 		)
 		return errorResponse(401, "unauthorized", "Missing or invalid authentication")
+	}
+
+	// Check principal authorization for IAM-authenticated requests
+	if isIAMAuthenticatedRequest(request) {
+		callerPrincipal := extractCallerPrincipal(request)
+		if !deps.Registry.IsAllowedPrincipal(callerPrincipal) {
+			logger.WarnContext(ctx, "Unauthorized IAM principal",
+				slog.String("request_id", request.RequestContext.RequestID),
+				slog.String("caller_principal", callerPrincipal),
+			)
+			return errorResponse(403, "forbidden", "Principal not authorized for IAM access")
+		}
 	}
 
 	// Validate path accountId matches authenticated accountId
@@ -278,6 +298,17 @@ func extractAccountID(request events.APIGatewayProxyRequest) (string, error) {
 	}
 
 	return sub, nil
+}
+
+// isIAMAuthenticatedRequest checks if the request is IAM-authenticated
+// by looking at the path (contains /download-iam/)
+func isIAMAuthenticatedRequest(request events.APIGatewayProxyRequest) bool {
+	return strings.Contains(request.Path, "/download-iam/")
+}
+
+// extractCallerPrincipal extracts the caller's IAM principal ARN from the request
+func extractCallerPrincipal(request events.APIGatewayProxyRequest) string {
+	return request.RequestContext.Identity.UserArn
 }
 
 // errorResponse builds an error response
@@ -470,10 +501,29 @@ func main() {
 		panic(err)
 	}
 
+	// Initialize database client for plugin registry
+	dbClient, err := db.NewClient(ctx, tableName)
+	if err != nil {
+		logger.Error("FATAL: Failed to initialize DynamoDB client for plugin registry",
+			slog.String("error", err.Error()),
+		)
+		panic(err)
+	}
+
+	// Load plugin registry for IAM principal authorization
+	registry := plugin.NewRegistry()
+	if err := registry.LoadFromDynamoDB(ctx, dbClient); err != nil {
+		logger.Error("FATAL: Failed to load plugin registry",
+			slog.String("error", err.Error()),
+		)
+		panic(err)
+	}
+
 	deps = &Dependencies{
 		DB:            NewDynamoDBBlobDB(dynamoClient, tableName),
 		Signer:        signer,
 		SecretsReader: secretsReader,
+		Registry:      registry,
 		Config: Config{
 			CloudFrontDomain:    cloudfrontDomain,
 			CloudFrontKeyPairID: keyPairID,

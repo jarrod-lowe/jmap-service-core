@@ -19,20 +19,32 @@ type PluginQuerier interface {
 
 // Registry holds loaded plugin configuration
 type Registry struct {
-	methodMap        map[string]MethodTarget
-	capabilitySet    map[string]bool
-	capabilityConfig map[string]map[string]any
-	plugins          []PluginRecord
+	methodMap         map[string]MethodTarget
+	capabilitySet     map[string]bool
+	capabilityConfig  map[string]map[string]any
+	plugins           []PluginRecord
+	allowedPrincipals map[string]bool // aggregated from all plugins' ClientPrincipals
 }
 
 // NewRegistry creates an empty registry
 func NewRegistry() *Registry {
 	return &Registry{
-		methodMap:        make(map[string]MethodTarget),
-		capabilitySet:    make(map[string]bool),
-		capabilityConfig: make(map[string]map[string]any),
-		plugins:          []PluginRecord{},
+		methodMap:         make(map[string]MethodTarget),
+		capabilitySet:     make(map[string]bool),
+		capabilityConfig:  make(map[string]map[string]any),
+		plugins:           []PluginRecord{},
+		allowedPrincipals: make(map[string]bool),
 	}
+}
+
+// NewRegistryWithPrincipals creates a registry with pre-populated allowed principals.
+// This is primarily for testing.
+func NewRegistryWithPrincipals(principals []string) *Registry {
+	r := NewRegistry()
+	for _, p := range principals {
+		r.allowedPrincipals[p] = true
+	}
+	return r
 }
 
 // LoadFromDynamoDB loads all plugins from DynamoDB
@@ -63,6 +75,11 @@ func (r *Registry) LoadFromDynamoDB(ctx context.Context, querier PluginQuerier) 
 				// Make a copy to avoid aliasing
 				r.capabilityConfig[capability] = maps.Clone(config)
 			}
+		}
+
+		// Aggregate client principals
+		for _, principal := range record.ClientPrincipals {
+			r.allowedPrincipals[principal] = true
 		}
 	}
 
@@ -99,4 +116,16 @@ func (r *Registry) GetCapabilityConfig(capability string) map[string]any {
 // HasCapability checks if a capability is available
 func (r *Registry) HasCapability(capability string) bool {
 	return r.capabilitySet[capability]
+}
+
+// IsAllowedPrincipal checks if the given caller ARN is allowed to access IAM endpoints.
+// Returns true if the caller is registered by any plugin.
+// Handles assumed-role ARN translation automatically.
+func (r *Registry) IsAllowedPrincipal(callerARN string) bool {
+	// Convert map keys to slice for IsAllowedARN
+	registeredARNs := make([]string, 0, len(r.allowedPrincipals))
+	for arn := range r.allowedPrincipals {
+		registeredARNs = append(registeredARNs, arn)
+	}
+	return IsAllowedARN(registeredARNs, callerARN)
 }

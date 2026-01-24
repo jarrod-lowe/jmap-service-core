@@ -277,3 +277,120 @@ func TestRegistry_NewRegistry_HasNoCapabilities(t *testing.T) {
 		t.Error("Expected empty registry to not have core capability")
 	}
 }
+
+// createTestPluginItemWithPrincipals creates a plugin record with clientPrincipals
+func createTestPluginItemWithPrincipals(pluginID string, principals []string) map[string]types.AttributeValue {
+	record := PluginRecord{
+		PK:               PluginPrefix,
+		SK:               PluginPrefix + pluginID,
+		PluginID:         pluginID,
+		Capabilities:     map[string]map[string]any{},
+		Methods:          map[string]MethodTarget{},
+		ClientPrincipals: principals,
+		RegisteredAt:     "2025-01-17T10:00:00Z",
+		Version:          "1.0.0",
+	}
+	item, _ := attributevalue.MarshalMap(record)
+	return item
+}
+
+func TestRegistry_IsAllowedPrincipal_RegisteredPrincipalIsAllowed(t *testing.T) {
+	mock := &mockQuerier{
+		items: []map[string]types.AttributeValue{
+			createTestPluginItemWithPrincipals("ingest-plugin", []string{
+				"arn:aws:iam::123456789012:role/IngestRole",
+			}),
+		},
+	}
+
+	registry := NewRegistry()
+	_ = registry.LoadFromDynamoDB(context.Background(), mock)
+
+	if !registry.IsAllowedPrincipal("arn:aws:iam::123456789012:role/IngestRole") {
+		t.Error("expected registered principal to be allowed")
+	}
+}
+
+func TestRegistry_IsAllowedPrincipal_UnregisteredPrincipalIsDenied(t *testing.T) {
+	mock := &mockQuerier{
+		items: []map[string]types.AttributeValue{
+			createTestPluginItemWithPrincipals("ingest-plugin", []string{
+				"arn:aws:iam::123456789012:role/IngestRole",
+			}),
+		},
+	}
+
+	registry := NewRegistry()
+	_ = registry.LoadFromDynamoDB(context.Background(), mock)
+
+	if registry.IsAllowedPrincipal("arn:aws:iam::123456789012:role/OtherRole") {
+		t.Error("expected unregistered principal to be denied")
+	}
+}
+
+func TestRegistry_IsAllowedPrincipal_AssumedRoleMatchesRegisteredRole(t *testing.T) {
+	mock := &mockQuerier{
+		items: []map[string]types.AttributeValue{
+			createTestPluginItemWithPrincipals("ingest-plugin", []string{
+				"arn:aws:iam::123456789012:role/IngestRole",
+			}),
+		},
+	}
+
+	registry := NewRegistry()
+	_ = registry.LoadFromDynamoDB(context.Background(), mock)
+
+	// Assumed role should match the registered role
+	assumedRoleARN := "arn:aws:sts::123456789012:assumed-role/IngestRole/session-123"
+	if !registry.IsAllowedPrincipal(assumedRoleARN) {
+		t.Error("expected assumed role caller to match registered role ARN")
+	}
+}
+
+func TestRegistry_IsAllowedPrincipal_EmptyRegistryDeniesAll(t *testing.T) {
+	registry := NewRegistry()
+
+	if registry.IsAllowedPrincipal("arn:aws:iam::123456789012:role/AnyRole") {
+		t.Error("expected empty registry to deny all principals")
+	}
+}
+
+func TestRegistry_IsAllowedPrincipal_AggregatesFromMultiplePlugins(t *testing.T) {
+	mock := &mockQuerier{
+		items: []map[string]types.AttributeValue{
+			createTestPluginItemWithPrincipals("plugin-a", []string{
+				"arn:aws:iam::123456789012:role/RoleA",
+			}),
+			createTestPluginItemWithPrincipals("plugin-b", []string{
+				"arn:aws:iam::123456789012:role/RoleB",
+			}),
+		},
+	}
+
+	registry := NewRegistry()
+	_ = registry.LoadFromDynamoDB(context.Background(), mock)
+
+	// Both roles from different plugins should be allowed
+	if !registry.IsAllowedPrincipal("arn:aws:iam::123456789012:role/RoleA") {
+		t.Error("expected RoleA from plugin-a to be allowed")
+	}
+	if !registry.IsAllowedPrincipal("arn:aws:iam::123456789012:role/RoleB") {
+		t.Error("expected RoleB from plugin-b to be allowed")
+	}
+}
+
+func TestRegistry_IsAllowedPrincipal_PluginWithNoPrincipals(t *testing.T) {
+	mock := &mockQuerier{
+		items: []map[string]types.AttributeValue{
+			createTestPluginItem("no-principals", map[string]map[string]any{}, map[string]MethodTarget{}),
+		},
+	}
+
+	registry := NewRegistry()
+	_ = registry.LoadFromDynamoDB(context.Background(), mock)
+
+	// Plugin with no principals should not affect the allow list
+	if registry.IsAllowedPrincipal("arn:aws:iam::123456789012:role/AnyRole") {
+		t.Error("expected registry with no principals to deny all")
+	}
+}

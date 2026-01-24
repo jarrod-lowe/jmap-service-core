@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/aws/aws-lambda-go/events"
+	"github.com/jarrod-lowe/jmap-service-core/internal/plugin"
 )
 
 // Mock implementations of interfaces for testing
@@ -907,5 +908,124 @@ func TestGetParentHeader_CaseInsensitive(t *testing.T) {
 				t.Errorf("getParentHeader(%v) = %q, want %q", tc.headers, result, tc.expected)
 			}
 		})
+	}
+}
+
+// IAM Principal Authorization Tests
+
+func setupTestDepsWithPrincipals(storage *mockBlobStorage, db *mockBlobDB, uuidGen *mockUUIDGenerator, principals []string) {
+	deps = &Dependencies{
+		Storage:  storage,
+		DB:       db,
+		UUIDGen:  uuidGen,
+		Registry: plugin.NewRegistryWithPrincipals(principals),
+	}
+}
+
+func TestHandler_IAMAuth_RegisteredPrincipal_Succeeds(t *testing.T) {
+	storage := &mockBlobStorage{}
+	db := &mockBlobDB{}
+	uuidGen := &mockUUIDGenerator{nextID: "test-uuid"}
+	setupTestDepsWithPrincipals(storage, db, uuidGen, []string{"arn:aws:iam::123456789012:role/IngestRole"})
+
+	request := events.APIGatewayProxyRequest{
+		Path: "/upload-iam/user-123",
+		Body: base64.StdEncoding.EncodeToString([]byte("content")),
+		IsBase64Encoded: true,
+		Headers: map[string]string{
+			"Content-Type": "message/rfc822",
+		},
+		PathParameters: map[string]string{
+			"accountId": "user-123",
+		},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "req-abc",
+			Identity: events.APIGatewayRequestIdentity{
+				UserArn: "arn:aws:iam::123456789012:role/IngestRole",
+			},
+		},
+	}
+
+	ctx := context.Background()
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	if response.StatusCode != 201 {
+		t.Errorf("expected status code 201, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+}
+
+func TestHandler_IAMAuth_UnregisteredPrincipal_Returns403(t *testing.T) {
+	storage := &mockBlobStorage{}
+	db := &mockBlobDB{}
+	uuidGen := &mockUUIDGenerator{nextID: "test-uuid"}
+	setupTestDepsWithPrincipals(storage, db, uuidGen, []string{"arn:aws:iam::123456789012:role/IngestRole"})
+
+	request := events.APIGatewayProxyRequest{
+		Path: "/upload-iam/user-123",
+		Body: base64.StdEncoding.EncodeToString([]byte("content")),
+		IsBase64Encoded: true,
+		Headers: map[string]string{
+			"Content-Type": "message/rfc822",
+		},
+		PathParameters: map[string]string{
+			"accountId": "user-123",
+		},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "req-abc",
+			Identity: events.APIGatewayRequestIdentity{
+				UserArn: "arn:aws:iam::123456789012:role/UnauthorizedRole",
+			},
+		},
+	}
+
+	ctx := context.Background()
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	if response.StatusCode != 403 {
+		t.Errorf("expected status code 403, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+}
+
+func TestHandler_CognitoAuth_BypassesPrincipalCheck(t *testing.T) {
+	storage := &mockBlobStorage{}
+	db := &mockBlobDB{}
+	uuidGen := &mockUUIDGenerator{nextID: "test-uuid"}
+	// Empty principals list - but Cognito should still work
+	setupTestDepsWithPrincipals(storage, db, uuidGen, []string{})
+
+	request := events.APIGatewayProxyRequest{
+		Path: "/upload/user-123", // Not /upload-iam
+		Body: base64.StdEncoding.EncodeToString([]byte("content")),
+		IsBase64Encoded: true,
+		Headers: map[string]string{
+			"Content-Type": "message/rfc822",
+		},
+		PathParameters: map[string]string{
+			"accountId": "user-123",
+		},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "req-abc",
+			Authorizer: map[string]any{
+				"claims": map[string]any{
+					"sub": "user-123",
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	if response.StatusCode != 201 {
+		t.Errorf("expected status code 201, got %d. Body: %s", response.StatusCode, response.Body)
 	}
 }

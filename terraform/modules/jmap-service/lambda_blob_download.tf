@@ -52,12 +52,13 @@ resource "aws_iam_role_policy" "blob_download_cloudwatch_metrics" {
   policy = data.aws_iam_policy_document.cloudwatch_metrics.json
 }
 
-# IAM policy for DynamoDB access (read blob records)
+# IAM policy for DynamoDB access (read blob records and plugin registry)
 data "aws_iam_policy_document" "blob_download_dynamodb" {
   statement {
     effect = "Allow"
     actions = [
-      "dynamodb:GetItem"
+      "dynamodb:GetItem",
+      "dynamodb:Query"
     ]
     resources = [aws_dynamodb_table.jmap_data.arn]
   }

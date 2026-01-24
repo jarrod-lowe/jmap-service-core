@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
@@ -81,6 +82,22 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 	}
 
 	span.SetAttributes(attribute.String("account_id", accountID))
+
+	// Check principal authorization for IAM-authenticated requests
+	if isIAMAuthenticatedRequest(request) {
+		callerPrincipal := extractCallerPrincipal(request)
+		if !deps.Registry.IsAllowedPrincipal(callerPrincipal) {
+			logger.WarnContext(ctx, "Unauthorized IAM principal",
+				slog.String("request_id", request.RequestContext.RequestID),
+				slog.String("caller_principal", callerPrincipal),
+			)
+			return Response{
+				StatusCode: 403,
+				Headers:    map[string]string{"Content-Type": "application/json"},
+				Body:       `{"type":"forbidden","description":"Principal not authorized for IAM access"}`,
+			}, nil
+		}
+	}
 
 	// Parse JMAP request
 	var jmapReq JMAPRequest
@@ -249,6 +266,17 @@ func processMethodCall(ctx context.Context, accountID string, call []any, index 
 		pluginResp.MethodResponse.Args,
 		pluginResp.MethodResponse.ClientID,
 	}
+}
+
+// isIAMAuthenticatedRequest checks if the request is IAM-authenticated
+// by looking at the path (contains /jmap-iam/)
+func isIAMAuthenticatedRequest(request events.APIGatewayProxyRequest) bool {
+	return strings.Contains(request.Path, "/jmap-iam/")
+}
+
+// extractCallerPrincipal extracts the caller's IAM principal ARN from the request
+func extractCallerPrincipal(request events.APIGatewayProxyRequest) string {
+	return request.RequestContext.Identity.UserArn
 }
 
 func main() {

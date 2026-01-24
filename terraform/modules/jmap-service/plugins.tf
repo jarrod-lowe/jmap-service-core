@@ -36,6 +36,9 @@ resource "aws_dynamodb_table_item" "core_plugin" {
         }
       }
     }
+    clientPrincipals = {
+      L = [for arn in var.iam_client_principals : { S = arn }]
+    }
     registeredAt = { S = "2025-01-17T00:00:00Z" }
     version      = { S = "1.0.0" }
   })

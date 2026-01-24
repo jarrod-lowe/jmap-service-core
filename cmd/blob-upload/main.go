@@ -20,6 +20,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/google/uuid"
+	"github.com/jarrod-lowe/jmap-service-core/internal/db"
+	"github.com/jarrod-lowe/jmap-service-core/internal/plugin"
 )
 
 var (
@@ -85,11 +87,17 @@ type Response struct {
 	Body       string            `json:"body"`
 }
 
+// PrincipalChecker checks if a caller is allowed to access IAM endpoints
+type PrincipalChecker interface {
+	IsAllowedPrincipal(callerARN string) bool
+}
+
 // Dependencies for handler (injectable for testing)
 type Dependencies struct {
-	Storage BlobStorage
-	DB      BlobDB
-	UUIDGen UUIDGenerator
+	Storage  BlobStorage
+	DB       BlobDB
+	UUIDGen  UUIDGenerator
+	Registry PrincipalChecker
 }
 
 var deps *Dependencies
@@ -104,6 +112,18 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 			slog.String("error", err.Error()),
 		)
 		return errorResponse(401, "unauthorized", "Missing or invalid authentication")
+	}
+
+	// Check principal authorization for IAM-authenticated requests
+	if isIAMAuthenticatedRequest(request) {
+		callerPrincipal := extractCallerPrincipal(request)
+		if !deps.Registry.IsAllowedPrincipal(callerPrincipal) {
+			logger.WarnContext(ctx, "Unauthorized IAM principal",
+				slog.String("request_id", request.RequestContext.RequestID),
+				slog.String("caller_principal", callerPrincipal),
+			)
+			return errorResponse(403, "forbidden", "Principal not authorized for IAM access")
+		}
 	}
 
 	// Validate Content-Type header
@@ -293,6 +313,17 @@ func getContentType(headers map[string]string) string {
 	return ""
 }
 
+// isIAMAuthenticatedRequest checks if the request is IAM-authenticated
+// by looking at the path (contains /upload-iam/)
+func isIAMAuthenticatedRequest(request events.APIGatewayProxyRequest) bool {
+	return strings.Contains(request.Path, "/upload-iam/")
+}
+
+// extractCallerPrincipal extracts the caller's IAM principal ARN from the request
+func extractCallerPrincipal(request events.APIGatewayProxyRequest) string {
+	return request.RequestContext.Identity.UserArn
+}
+
 // decodeBody decodes the request body (handles base64 encoding)
 func decodeBody(request events.APIGatewayProxyRequest) ([]byte, error) {
 	if request.IsBase64Encoded {
@@ -439,10 +470,29 @@ func main() {
 	s3Client := s3.NewFromConfig(cfg)
 	dynamoClient := dynamodb.NewFromConfig(cfg)
 
+	// Initialize database client for plugin registry
+	dbClient, err := db.NewClient(ctx, tableName)
+	if err != nil {
+		logger.Error("FATAL: Failed to initialize DynamoDB client",
+			slog.String("error", err.Error()),
+		)
+		panic(err)
+	}
+
+	// Load plugin registry for IAM principal authorization
+	registry := plugin.NewRegistry()
+	if err := registry.LoadFromDynamoDB(ctx, dbClient); err != nil {
+		logger.Error("FATAL: Failed to load plugin registry",
+			slog.String("error", err.Error()),
+		)
+		panic(err)
+	}
+
 	deps = &Dependencies{
-		Storage: NewS3BlobStorage(s3Client, bucketName),
-		DB:      NewDynamoDBBlobDB(dynamoClient, tableName),
-		UUIDGen: &RealUUIDGenerator{},
+		Storage:  NewS3BlobStorage(s3Client, bucketName),
+		DB:       NewDynamoDBBlobDB(dynamoClient, tableName),
+		UUIDGen:  &RealUUIDGenerator{},
+		Registry: registry,
 	}
 
 	lambda.Start(handler)

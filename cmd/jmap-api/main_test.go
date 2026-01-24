@@ -280,3 +280,130 @@ func TestProcessMethodCall_NonStringMethodName_ReturnsError(t *testing.T) {
 		t.Errorf("expected invalidArguments error, got '%v'", args["type"])
 	}
 }
+
+// setupTestDepsWithPrincipals creates test deps with a registry that has registered principals
+func setupTestDepsWithPrincipals(principals []string) {
+	tp := noop.NewTracerProvider()
+	otel.SetTracerProvider(tp)
+
+	registry := plugin.NewRegistryWithPrincipals(principals)
+
+	deps = &Dependencies{
+		Registry: registry,
+		Invoker:  &mockInvoker{},
+	}
+}
+
+func TestHandler_IAMAuth_RegisteredPrincipal_Succeeds(t *testing.T) {
+	setupTestDepsWithPrincipals([]string{"arn:aws:iam::123456789012:role/IngestRole"})
+	ctx := context.Background()
+
+	request := events.APIGatewayProxyRequest{
+		Path: "/jmap-iam/user-123",
+		Body: `{"using":[],"methodCalls":[]}`,
+		PathParameters: map[string]string{
+			"accountId": "user-123",
+		},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "test-request-id",
+			Identity: events.APIGatewayRequestIdentity{
+				UserArn: "arn:aws:iam::123456789012:role/IngestRole",
+			},
+		},
+	}
+
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	if response.StatusCode != 200 {
+		t.Errorf("expected status code 200, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+}
+
+func TestHandler_IAMAuth_UnregisteredPrincipal_Returns403(t *testing.T) {
+	setupTestDepsWithPrincipals([]string{"arn:aws:iam::123456789012:role/IngestRole"})
+	ctx := context.Background()
+
+	request := events.APIGatewayProxyRequest{
+		Path: "/jmap-iam/user-123",
+		Body: `{"using":[],"methodCalls":[]}`,
+		PathParameters: map[string]string{
+			"accountId": "user-123",
+		},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "test-request-id",
+			Identity: events.APIGatewayRequestIdentity{
+				UserArn: "arn:aws:iam::123456789012:role/UnauthorizedRole",
+			},
+		},
+	}
+
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	if response.StatusCode != 403 {
+		t.Errorf("expected status code 403, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+}
+
+func TestHandler_CognitoAuth_BypassesPrincipalCheck(t *testing.T) {
+	// Registry has no principals registered, but Cognito requests should still work
+	setupTestDepsWithPrincipals([]string{})
+	ctx := context.Background()
+
+	request := events.APIGatewayProxyRequest{
+		Path: "/jmap", // Not /jmap-iam
+		Body: `{"using":[],"methodCalls":[]}`,
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "test-request-id",
+			Authorizer: map[string]any{
+				"claims": map[string]any{
+					"sub": "user-123",
+				},
+			},
+		},
+	}
+
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	// Should succeed even with empty principal list because this is Cognito auth
+	if response.StatusCode != 200 {
+		t.Errorf("expected status code 200, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+}
+
+func TestHandler_IAMAuth_AssumedRole_MatchesRegisteredRole(t *testing.T) {
+	setupTestDepsWithPrincipals([]string{"arn:aws:iam::123456789012:role/IngestRole"})
+	ctx := context.Background()
+
+	request := events.APIGatewayProxyRequest{
+		Path: "/jmap-iam/user-123",
+		Body: `{"using":[],"methodCalls":[]}`,
+		PathParameters: map[string]string{
+			"accountId": "user-123",
+		},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "test-request-id",
+			Identity: events.APIGatewayRequestIdentity{
+				// Assumed role ARN should match the registered role
+				UserArn: "arn:aws:sts::123456789012:assumed-role/IngestRole/session-123",
+			},
+		},
+	}
+
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	if response.StatusCode != 200 {
+		t.Errorf("expected status code 200, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+}

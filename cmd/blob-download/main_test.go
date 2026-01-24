@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
+	"github.com/jarrod-lowe/jmap-service-core/internal/plugin"
 )
 
 // =============================================================================
@@ -1114,5 +1115,138 @@ func TestDownload_CompositeBlobID_LookupUsesBaseID(t *testing.T) {
 	// Verify DynamoDB was queried with base blob ID, not composite
 	if capturedBlobID != "blob-123" {
 		t.Errorf("expected DynamoDB lookup with 'blob-123', got '%s'", capturedBlobID)
+	}
+}
+
+// =============================================================================
+// IAM Principal Authorization Tests
+// =============================================================================
+
+func setupTestDepsWithPrincipals(db *mockBlobDB, signer *mockURLSigner, secrets *mockSecretsReader, principals []string) {
+	deps = &Dependencies{
+		DB:            db,
+		Signer:        signer,
+		SecretsReader: secrets,
+		Registry:      plugin.NewRegistryWithPrincipals(principals),
+		Config: Config{
+			CloudFrontDomain:    "cdn.example.com",
+			CloudFrontKeyPairID: "KEYPAIRID123",
+			PrivateKeySecretARN: "arn:aws:secretsmanager:us-east-1:123456789012:secret:test",
+			SignedURLExpiry:     5 * time.Minute,
+		},
+	}
+}
+
+func TestHandler_IAMAuth_RegisteredPrincipal_Succeeds(t *testing.T) {
+	db := &mockBlobDB{
+		blob: &BlobRecord{
+			BlobID:      "blob-123",
+			AccountID:   "user-456",
+			Size:        1024,
+			ContentType: "message/rfc822",
+			S3Key:       "user-456/blob-123",
+			CreatedAt:   "2024-01-01T00:00:00Z",
+		},
+	}
+	signer := &mockURLSigner{signedURL: "https://cdn.example.com/signed"}
+	secrets := &mockSecretsReader{}
+	setupTestDepsWithPrincipals(db, signer, secrets, []string{"arn:aws:iam::123456789012:role/IngestRole"})
+
+	request := events.APIGatewayProxyRequest{
+		Path: "/download-iam/user-456/blob-123",
+		PathParameters: map[string]string{
+			"accountId": "user-456",
+			"blobId":    "blob-123",
+		},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "req-abc",
+			Identity: events.APIGatewayRequestIdentity{
+				UserArn: "arn:aws:iam::123456789012:role/IngestRole",
+			},
+		},
+	}
+
+	ctx := context.Background()
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	if response.StatusCode != 302 {
+		t.Errorf("expected status code 302, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+}
+
+func TestHandler_IAMAuth_UnregisteredPrincipal_Returns403(t *testing.T) {
+	db := &mockBlobDB{}
+	signer := &mockURLSigner{}
+	secrets := &mockSecretsReader{}
+	setupTestDepsWithPrincipals(db, signer, secrets, []string{"arn:aws:iam::123456789012:role/IngestRole"})
+
+	request := events.APIGatewayProxyRequest{
+		Path: "/download-iam/user-456/blob-123",
+		PathParameters: map[string]string{
+			"accountId": "user-456",
+			"blobId":    "blob-123",
+		},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "req-abc",
+			Identity: events.APIGatewayRequestIdentity{
+				UserArn: "arn:aws:iam::123456789012:role/UnauthorizedRole",
+			},
+		},
+	}
+
+	ctx := context.Background()
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	if response.StatusCode != 403 {
+		t.Errorf("expected status code 403, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+}
+
+func TestHandler_CognitoAuth_BypassesPrincipalCheck(t *testing.T) {
+	db := &mockBlobDB{
+		blob: &BlobRecord{
+			BlobID:      "blob-123",
+			AccountID:   "user-456",
+			Size:        1024,
+			ContentType: "message/rfc822",
+			S3Key:       "user-456/blob-123",
+			CreatedAt:   "2024-01-01T00:00:00Z",
+		},
+	}
+	signer := &mockURLSigner{signedURL: "https://cdn.example.com/signed"}
+	secrets := &mockSecretsReader{}
+	// Empty principals list - but Cognito should still work
+	setupTestDepsWithPrincipals(db, signer, secrets, []string{})
+
+	request := events.APIGatewayProxyRequest{
+		Path: "/download/user-456/blob-123", // Not /download-iam
+		PathParameters: map[string]string{
+			"accountId": "user-456",
+			"blobId":    "blob-123",
+		},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "req-abc",
+			Authorizer: map[string]any{
+				"claims": map[string]any{
+					"sub": "user-456",
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	if response.StatusCode != 302 {
+		t.Errorf("expected status code 302, got %d. Body: %s", response.StatusCode, response.Body)
 	}
 }
