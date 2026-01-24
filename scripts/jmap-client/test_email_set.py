@@ -341,6 +341,43 @@ def get_email_mailbox_ids(
     return emails[0].get("mailboxIds")
 
 
+def get_email_keywords(
+    api_url: str, token: str, account_id: str, email_id: str
+) -> dict | None:
+    """Get the keywords for an email via Email/get."""
+    email_get_call = [
+        "Email/get",
+        {
+            "accountId": account_id,
+            "ids": [email_id],
+            "properties": ["keywords"],
+        },
+        "getEmail0",
+    ]
+
+    try:
+        response = make_jmap_request(api_url, token, [email_get_call])
+    except Exception:
+        return None
+
+    if "methodResponses" not in response:
+        return None
+
+    method_responses = response["methodResponses"]
+    if len(method_responses) == 0:
+        return None
+
+    response_name, response_data, _ = method_responses[0]
+    if response_name != "Email/get":
+        return None
+
+    emails = response_data.get("list", [])
+    if not emails:
+        return None
+
+    return emails[0].get("keywords")
+
+
 # =============================================================================
 # Test: mailboxIds Changes (RFC 8621 Section 4.6)
 # =============================================================================
@@ -1731,6 +1768,734 @@ def test_mailbox_state_changes_on_email_update(
 
 
 # =============================================================================
+# Test: Keyword Updates (RFC 8621 Section 4.4)
+# =============================================================================
+
+
+def test_add_seen_keyword_decreases_unread(
+    api_url: str,
+    upload_url: str,
+    token: str,
+    account_id: str,
+    results,
+):
+    """
+    Test: Adding $seen keyword decreases unreadEmails.
+
+    RFC 8621 Section 2: unreadEmails counts emails WITHOUT $seen keyword.
+    RFC 8621 Section 4.4: keywords is updatable.
+    """
+    print()
+    print("Test: Add $seen keyword decreases unreadEmails (RFC 8621 Section 4.4)...")
+
+    # Create mailbox
+    mailbox_id = create_test_mailbox(api_url, token, account_id)
+    if not mailbox_id:
+        results.record_fail(
+            "Add $seen test setup", "Failed to create mailbox"
+        )
+        return
+
+    # Import UNREAD email (no $seen keyword)
+    email_id = import_email_with_keywords(
+        api_url, upload_url, token, account_id, mailbox_id, keywords={}
+    )
+    if not email_id:
+        results.record_fail(
+            "Add $seen test setup", "Failed to import unread email"
+        )
+        return
+
+    # Get initial unread count
+    initial_counts = get_mailbox_counts(api_url, token, account_id, mailbox_id)
+    if initial_counts is None:
+        results.record_fail(
+            "Add $seen test setup", "Failed to get initial counts"
+        )
+        return
+
+    initial_unread = initial_counts.get("unreadEmails", 0)
+
+    # Add $seen keyword via patch
+    try:
+        response = email_set_update(
+            api_url,
+            token,
+            account_id,
+            email_id,
+            {"keywords/$seen": True},
+        )
+    except Exception as e:
+        results.record_fail("Add $seen Email/set request", str(e))
+        return
+
+    if "methodResponses" not in response:
+        results.record_fail(
+            "Add $seen response", f"No methodResponses: {response}"
+        )
+        return
+
+    method_responses = response["methodResponses"]
+    if len(method_responses) == 0:
+        results.record_fail("Add $seen response", "Empty methodResponses")
+        return
+
+    response_name, response_data, _ = method_responses[0]
+    if response_name == "error":
+        results.record_fail(
+            "Add $seen request",
+            f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
+        )
+        return
+
+    if response_name != "Email/set":
+        results.record_fail("Add $seen response", f"Unexpected method: {response_name}")
+        return
+
+    # Check update succeeded
+    updated = response_data.get("updated", {})
+    not_updated = response_data.get("notUpdated", {})
+
+    if email_id not in updated:
+        if email_id in not_updated:
+            error = not_updated[email_id]
+            results.record_fail(
+                "Add $seen keyword",
+                f"Not updated: {error.get('type')}: {error.get('description')}",
+            )
+        else:
+            results.record_fail(
+                "Add $seen keyword",
+                f"Email not in updated or notUpdated: {response_data}",
+            )
+        return
+
+    # Verify keywords via Email/get
+    keywords = get_email_keywords(api_url, token, account_id, email_id)
+    if keywords is None:
+        results.record_fail("Add $seen keyword", "Failed to get keywords")
+        return
+
+    if not keywords.get("$seen"):
+        results.record_fail(
+            "Add $seen keyword",
+            f"Expected $seen=true, got keywords: {keywords}",
+        )
+        return
+
+    results.record_pass("Add $seen keyword via patch", f"keywords: {keywords}")
+
+    # Verify unread count decreased
+    new_counts = get_mailbox_counts(api_url, token, account_id, mailbox_id)
+    if new_counts is None:
+        results.record_fail("Add $seen test", "Failed to get new counts")
+        return
+
+    new_unread = new_counts.get("unreadEmails", 0)
+
+    if new_unread == initial_unread - 1:
+        results.record_pass(
+            "Add $seen decreases unreadEmails",
+            f"unreadEmails: {initial_unread} -> {new_unread}",
+        )
+    else:
+        results.record_fail(
+            "Add $seen decreases unreadEmails",
+            f"Expected {initial_unread - 1}, got {new_unread}",
+        )
+
+
+def test_remove_seen_keyword_increases_unread(
+    api_url: str,
+    upload_url: str,
+    token: str,
+    account_id: str,
+    results,
+):
+    """
+    Test: Removing $seen keyword increases unreadEmails.
+
+    RFC 8621 Section 2: unreadEmails counts emails WITHOUT $seen keyword.
+    RFC 8620 Section 5.3: Use patch "keywords/$seen": null to remove.
+    """
+    print()
+    print("Test: Remove $seen keyword increases unreadEmails (RFC 8620 Section 5.3)...")
+
+    # Create mailbox
+    mailbox_id = create_test_mailbox(api_url, token, account_id)
+    if not mailbox_id:
+        results.record_fail(
+            "Remove $seen test setup", "Failed to create mailbox"
+        )
+        return
+
+    # Import READ email (with $seen keyword)
+    email_id = import_email_with_keywords(
+        api_url, upload_url, token, account_id, mailbox_id, keywords={"$seen": True}
+    )
+    if not email_id:
+        results.record_fail(
+            "Remove $seen test setup", "Failed to import read email"
+        )
+        return
+
+    # Get initial unread count
+    initial_counts = get_mailbox_counts(api_url, token, account_id, mailbox_id)
+    if initial_counts is None:
+        results.record_fail(
+            "Remove $seen test setup", "Failed to get initial counts"
+        )
+        return
+
+    initial_unread = initial_counts.get("unreadEmails", 0)
+
+    # Remove $seen keyword via patch (set to null)
+    try:
+        response = email_set_update(
+            api_url,
+            token,
+            account_id,
+            email_id,
+            {"keywords/$seen": None},
+        )
+    except Exception as e:
+        results.record_fail("Remove $seen Email/set request", str(e))
+        return
+
+    if "methodResponses" not in response:
+        results.record_fail(
+            "Remove $seen response", f"No methodResponses: {response}"
+        )
+        return
+
+    method_responses = response["methodResponses"]
+    if len(method_responses) == 0:
+        results.record_fail("Remove $seen response", "Empty methodResponses")
+        return
+
+    response_name, response_data, _ = method_responses[0]
+    if response_name == "error":
+        results.record_fail(
+            "Remove $seen request",
+            f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
+        )
+        return
+
+    if response_name != "Email/set":
+        results.record_fail("Remove $seen response", f"Unexpected method: {response_name}")
+        return
+
+    # Check update succeeded
+    updated = response_data.get("updated", {})
+    not_updated = response_data.get("notUpdated", {})
+
+    if email_id not in updated:
+        if email_id in not_updated:
+            error = not_updated[email_id]
+            results.record_fail(
+                "Remove $seen keyword",
+                f"Not updated: {error.get('type')}: {error.get('description')}",
+            )
+        else:
+            results.record_fail(
+                "Remove $seen keyword",
+                f"Email not in updated or notUpdated: {response_data}",
+            )
+        return
+
+    # Verify keywords via Email/get
+    # Note: After removing all keywords, server may return None or {} - both are valid
+    keywords = get_email_keywords(api_url, token, account_id, email_id)
+    if keywords is None:
+        keywords = {}  # Treat None as empty keywords (no keywords set)
+
+    if keywords.get("$seen"):
+        results.record_fail(
+            "Remove $seen keyword",
+            f"Expected $seen absent, got keywords: {keywords}",
+        )
+        return
+
+    results.record_pass("Remove $seen keyword via patch", f"keywords: {keywords}")
+
+    # Verify unread count increased
+    new_counts = get_mailbox_counts(api_url, token, account_id, mailbox_id)
+    if new_counts is None:
+        results.record_fail("Remove $seen test", "Failed to get new counts")
+        return
+
+    new_unread = new_counts.get("unreadEmails", 0)
+
+    if new_unread == initial_unread + 1:
+        results.record_pass(
+            "Remove $seen increases unreadEmails",
+            f"unreadEmails: {initial_unread} -> {new_unread}",
+        )
+    else:
+        results.record_fail(
+            "Remove $seen increases unreadEmails",
+            f"Expected {initial_unread + 1}, got {new_unread}",
+        )
+
+
+def test_set_keywords_via_full_replacement(
+    api_url: str,
+    upload_url: str,
+    token: str,
+    account_id: str,
+    results,
+):
+    """
+    Test: Set keywords via full replacement.
+
+    RFC 8621 Section 4.4: keywords is updatable as a full map replacement.
+    """
+    print()
+    print("Test: Set keywords via full replacement (RFC 8621 Section 4.4)...")
+
+    # Create mailbox
+    mailbox_id = create_test_mailbox(api_url, token, account_id)
+    if not mailbox_id:
+        results.record_fail(
+            "Keywords replacement test setup", "Failed to create mailbox"
+        )
+        return
+
+    # Import email with some keywords
+    email_id = import_email_with_keywords(
+        api_url, upload_url, token, account_id, mailbox_id,
+        keywords={"$seen": True, "$answered": True}
+    )
+    if not email_id:
+        results.record_fail(
+            "Keywords replacement test setup", "Failed to import email"
+        )
+        return
+
+    # Verify initial keywords
+    initial_keywords = get_email_keywords(api_url, token, account_id, email_id)
+    if initial_keywords is None:
+        results.record_fail(
+            "Keywords replacement test setup", "Failed to get initial keywords"
+        )
+        return
+
+    if not (initial_keywords.get("$seen") and initial_keywords.get("$answered")):
+        results.record_fail(
+            "Keywords replacement test setup",
+            f"Expected $seen and $answered, got: {initial_keywords}",
+        )
+        return
+
+    # Replace keywords with entirely different set
+    try:
+        response = email_set_update(
+            api_url,
+            token,
+            account_id,
+            email_id,
+            {"keywords": {"$flagged": True}},
+        )
+    except Exception as e:
+        results.record_fail("Keywords replacement Email/set request", str(e))
+        return
+
+    if "methodResponses" not in response:
+        results.record_fail(
+            "Keywords replacement response", f"No methodResponses: {response}"
+        )
+        return
+
+    method_responses = response["methodResponses"]
+    if len(method_responses) == 0:
+        results.record_fail("Keywords replacement response", "Empty methodResponses")
+        return
+
+    response_name, response_data, _ = method_responses[0]
+    if response_name == "error":
+        results.record_fail(
+            "Keywords replacement request",
+            f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
+        )
+        return
+
+    if response_name != "Email/set":
+        results.record_fail(
+            "Keywords replacement response", f"Unexpected method: {response_name}"
+        )
+        return
+
+    # Check update succeeded
+    updated = response_data.get("updated", {})
+    not_updated = response_data.get("notUpdated", {})
+
+    if email_id not in updated:
+        if email_id in not_updated:
+            error = not_updated[email_id]
+            results.record_fail(
+                "Keywords replacement",
+                f"Not updated: {error.get('type')}: {error.get('description')}",
+            )
+        else:
+            results.record_fail(
+                "Keywords replacement",
+                f"Email not in updated or notUpdated: {response_data}",
+            )
+        return
+
+    # Verify keywords replaced completely
+    new_keywords = get_email_keywords(api_url, token, account_id, email_id)
+    if new_keywords is None:
+        results.record_fail("Keywords replacement", "Failed to get new keywords")
+        return
+
+    # Should only have $flagged, not $seen or $answered
+    if (
+        new_keywords.get("$flagged") and
+        not new_keywords.get("$seen") and
+        not new_keywords.get("$answered")
+    ):
+        results.record_pass(
+            "Keywords replaced completely via full replacement",
+            f"keywords: {new_keywords}",
+        )
+    else:
+        results.record_fail(
+            "Keywords replaced completely via full replacement",
+            f"Expected only $flagged, got: {new_keywords}",
+        )
+
+
+def test_add_non_unread_keyword_no_counter_change(
+    api_url: str,
+    upload_url: str,
+    token: str,
+    account_id: str,
+    results,
+):
+    """
+    Test: Adding non-$seen keyword doesn't change unreadEmails.
+
+    RFC 8621 Section 2: Only $seen affects unreadEmails count.
+    """
+    print()
+    print("Test: Add $flagged keyword doesn't change unreadEmails (RFC 8621 Section 2)...")
+
+    # Create mailbox
+    mailbox_id = create_test_mailbox(api_url, token, account_id)
+    if not mailbox_id:
+        results.record_fail(
+            "Non-unread keyword test setup", "Failed to create mailbox"
+        )
+        return
+
+    # Import UNREAD email
+    email_id = import_email_with_keywords(
+        api_url, upload_url, token, account_id, mailbox_id, keywords={}
+    )
+    if not email_id:
+        results.record_fail(
+            "Non-unread keyword test setup", "Failed to import email"
+        )
+        return
+
+    # Get initial unread count
+    initial_counts = get_mailbox_counts(api_url, token, account_id, mailbox_id)
+    if initial_counts is None:
+        results.record_fail(
+            "Non-unread keyword test setup", "Failed to get initial counts"
+        )
+        return
+
+    initial_unread = initial_counts.get("unreadEmails", 0)
+
+    # Add $flagged keyword via patch
+    try:
+        response = email_set_update(
+            api_url,
+            token,
+            account_id,
+            email_id,
+            {"keywords/$flagged": True},
+        )
+    except Exception as e:
+        results.record_fail("Add $flagged Email/set request", str(e))
+        return
+
+    if "methodResponses" not in response:
+        results.record_fail(
+            "Add $flagged response", f"No methodResponses: {response}"
+        )
+        return
+
+    method_responses = response["methodResponses"]
+    if len(method_responses) == 0:
+        results.record_fail("Add $flagged response", "Empty methodResponses")
+        return
+
+    response_name, response_data, _ = method_responses[0]
+    if response_name == "error":
+        results.record_fail(
+            "Add $flagged request",
+            f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
+        )
+        return
+
+    if response_name != "Email/set":
+        results.record_fail("Add $flagged response", f"Unexpected method: {response_name}")
+        return
+
+    # Check update succeeded
+    updated = response_data.get("updated", {})
+    if email_id not in updated:
+        not_updated = response_data.get("notUpdated", {})
+        if email_id in not_updated:
+            error = not_updated[email_id]
+            results.record_fail(
+                "Add $flagged keyword",
+                f"Not updated: {error.get('type')}: {error.get('description')}",
+            )
+        else:
+            results.record_fail(
+                "Add $flagged keyword",
+                f"Email not in updated or notUpdated: {response_data}",
+            )
+        return
+
+    # Verify keywords via Email/get
+    keywords = get_email_keywords(api_url, token, account_id, email_id)
+    if keywords is None:
+        results.record_fail("Add $flagged keyword", "Failed to get keywords")
+        return
+
+    if not keywords.get("$flagged"):
+        results.record_fail(
+            "Add $flagged keyword",
+            f"Expected $flagged=true, got keywords: {keywords}",
+        )
+        return
+
+    results.record_pass("Add $flagged keyword via patch", f"keywords: {keywords}")
+
+    # Verify unread count unchanged
+    new_counts = get_mailbox_counts(api_url, token, account_id, mailbox_id)
+    if new_counts is None:
+        results.record_fail("Non-unread keyword test", "Failed to get new counts")
+        return
+
+    new_unread = new_counts.get("unreadEmails", 0)
+
+    if new_unread == initial_unread:
+        results.record_pass(
+            "Add $flagged doesn't change unreadEmails",
+            f"unreadEmails unchanged: {new_unread}",
+        )
+    else:
+        results.record_fail(
+            "Add $flagged doesn't change unreadEmails",
+            f"Expected {initial_unread}, got {new_unread}",
+        )
+
+
+def test_email_state_changes_on_keyword_update(
+    api_url: str,
+    upload_url: str,
+    token: str,
+    account_id: str,
+    results,
+):
+    """
+    Test: Email state changes when keywords updated.
+
+    RFC 8620 Section 5.3: State MUST change when data changes.
+    """
+    print()
+    print("Test: Email state changes on keyword update (RFC 8620 Section 5.3)...")
+
+    # Create mailbox and import email
+    mailbox_id = create_test_mailbox(api_url, token, account_id)
+    if not mailbox_id:
+        results.record_fail(
+            "Email state on keyword update test setup", "Failed to create mailbox"
+        )
+        return
+
+    email_id = import_email_with_keywords(
+        api_url, upload_url, token, account_id, mailbox_id, keywords={}
+    )
+    if not email_id:
+        results.record_fail(
+            "Email state on keyword update test setup", "Failed to import email"
+        )
+        return
+
+    # Update keywords
+    try:
+        response = email_set_update(
+            api_url,
+            token,
+            account_id,
+            email_id,
+            {"keywords/$seen": True},
+        )
+    except Exception as e:
+        results.record_fail("Email state on keyword update Email/set request", str(e))
+        return
+
+    if "methodResponses" not in response:
+        results.record_fail(
+            "Email state on keyword update response", f"No methodResponses: {response}"
+        )
+        return
+
+    method_responses = response["methodResponses"]
+    if len(method_responses) == 0:
+        results.record_fail("Email state on keyword update response", "Empty methodResponses")
+        return
+
+    response_name, response_data, _ = method_responses[0]
+    if response_name == "error":
+        results.record_fail(
+            "Email state on keyword update request",
+            f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
+        )
+        return
+
+    if response_name != "Email/set":
+        results.record_fail(
+            "Email state on keyword update response", f"Unexpected method: {response_name}"
+        )
+        return
+
+    old_state = response_data.get("oldState")
+    new_state = response_data.get("newState")
+
+    if old_state is None or new_state is None:
+        results.record_fail(
+            "Email state on keyword update",
+            f"Missing state: oldState={old_state}, newState={new_state}",
+        )
+        return
+
+    if new_state != old_state:
+        results.record_pass(
+            "Email state changes on keyword update",
+            f"oldState={old_state[:16]}..., newState={new_state[:16]}...",
+        )
+    else:
+        results.record_fail(
+            "Email state changes on keyword update",
+            f"State unchanged: {old_state}",
+        )
+
+    # Verify newState matches subsequent Email/get
+    state_from_get = get_email_state(api_url, token, account_id)
+    if state_from_get == new_state:
+        results.record_pass(
+            "newState matches Email/get after keyword update",
+            f"Both report state: {new_state[:16]}...",
+        )
+    else:
+        results.record_fail(
+            "newState matches Email/get after keyword update",
+            f"Email/set newState={new_state[:16]}..., Email/get state={state_from_get[:16] if state_from_get else 'None'}...",
+        )
+
+
+def test_mailbox_state_changes_on_seen_keyword_update(
+    api_url: str,
+    upload_url: str,
+    token: str,
+    account_id: str,
+    results,
+):
+    """
+    Test: Mailbox state changes when $seen keyword changes (affects unreadEmails).
+
+    RFC 8621 Section 2: Mailbox counters are part of mailbox state.
+    """
+    print()
+    print("Test: Mailbox state changes on $seen keyword update (RFC 8621 Section 2)...")
+
+    # Create mailbox
+    mailbox_id = create_test_mailbox(api_url, token, account_id)
+    if not mailbox_id:
+        results.record_fail(
+            "Mailbox state on $seen update test setup", "Failed to create mailbox"
+        )
+        return
+
+    # Import UNREAD email
+    email_id = import_email_with_keywords(
+        api_url, upload_url, token, account_id, mailbox_id, keywords={}
+    )
+    if not email_id:
+        results.record_fail(
+            "Mailbox state on $seen update test setup", "Failed to import email"
+        )
+        return
+
+    # Get initial mailbox state
+    initial_mailbox_state = get_mailbox_state(api_url, token, account_id)
+    if not initial_mailbox_state:
+        results.record_fail(
+            "Mailbox state on $seen update test setup", "Failed to get initial mailbox state"
+        )
+        return
+
+    # Add $seen keyword (changes unreadEmails counter)
+    try:
+        response = email_set_update(
+            api_url,
+            token,
+            account_id,
+            email_id,
+            {"keywords/$seen": True},
+        )
+    except Exception as e:
+        results.record_fail("Mailbox state on $seen update Email/set request", str(e))
+        return
+
+    if "methodResponses" not in response:
+        results.record_fail(
+            "Mailbox state on $seen update response", f"No methodResponses: {response}"
+        )
+        return
+
+    method_responses = response["methodResponses"]
+    if len(method_responses) == 0:
+        results.record_fail("Mailbox state on $seen update response", "Empty methodResponses")
+        return
+
+    response_name, response_data, _ = method_responses[0]
+    if response_name == "error":
+        results.record_fail(
+            "Mailbox state on $seen update request",
+            f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
+        )
+        return
+
+    # Get new mailbox state
+    new_mailbox_state = get_mailbox_state(api_url, token, account_id)
+    if not new_mailbox_state:
+        results.record_fail(
+            "Mailbox state on $seen update test", "Failed to get new mailbox state"
+        )
+        return
+
+    if new_mailbox_state != initial_mailbox_state:
+        results.record_pass(
+            "Mailbox state changes on $seen keyword update",
+            f"Mailbox state changed from {initial_mailbox_state[:16]}... to {new_mailbox_state[:16]}...",
+        )
+    else:
+        results.record_fail(
+            "Mailbox state changes on $seen keyword update",
+            f"Mailbox state unchanged: {initial_mailbox_state[:16]}...",
+        )
+
+
+# =============================================================================
 # Main Entry Functions
 # =============================================================================
 
@@ -1833,5 +2598,43 @@ def test_email_set_state_tracking(client, config, results):
         api_url, upload_url, config.token, account_id, results
     )
     test_mailbox_state_changes_on_email_update(
+        api_url, upload_url, config.token, account_id, results
+    )
+
+
+def test_email_set_keyword_updates(client, config, results):
+    """Test Email/set keyword updates (RFC 8621 Section 4.4)."""
+    print()
+    print("=" * 40)
+    print("Testing Email/set keyword updates (RFC 8621 Section 4.4)...")
+    print("=" * 40)
+
+    session = client.jmap_session
+
+    try:
+        account_id = client.account_id
+    except Exception as e:
+        results.record_fail("Email/set keyword updates setup", f"No account ID: {e}")
+        return
+
+    api_url = session.api_url
+    upload_url = session.upload_url
+
+    test_add_seen_keyword_decreases_unread(
+        api_url, upload_url, config.token, account_id, results
+    )
+    test_remove_seen_keyword_increases_unread(
+        api_url, upload_url, config.token, account_id, results
+    )
+    test_set_keywords_via_full_replacement(
+        api_url, upload_url, config.token, account_id, results
+    )
+    test_add_non_unread_keyword_no_counter_change(
+        api_url, upload_url, config.token, account_id, results
+    )
+    test_email_state_changes_on_keyword_update(
+        api_url, upload_url, config.token, account_id, results
+    )
+    test_mailbox_state_changes_on_seen_keyword_update(
         api_url, upload_url, config.token, account_id, results
     )

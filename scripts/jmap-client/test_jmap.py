@@ -28,6 +28,7 @@ from test_email_set import (
     test_email_set_mailbox_changes,
     test_email_set_counter_updates,
     test_email_set_state_tracking,
+    test_email_set_keyword_updates,
 )
 from test_thread import test_thread_operations
 
@@ -1569,6 +1570,7 @@ def main():
         test_email_set_mailbox_changes(client, config, results)
         test_email_set_counter_updates(client, config, results)
         test_email_set_state_tracking(client, config, results)
+        test_email_set_keyword_updates(client, config, results)
 
     # Print summary
     print_summary(results)
