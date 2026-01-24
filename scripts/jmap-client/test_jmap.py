@@ -24,6 +24,11 @@ from jmapc.methods import CoreEcho, EmailGet, EmailQuery
 
 from test_changes import test_email_changes, test_mailbox_changes
 from test_email import setup_query_test_data, test_email_import_and_get
+from test_email_set import (
+    test_email_set_mailbox_changes,
+    test_email_set_counter_updates,
+    test_email_set_state_tracking,
+)
 from test_thread import test_thread_operations
 
 
@@ -1556,6 +1561,11 @@ def main():
 
         # Mailbox/changes E2E Tests (RFC 8620 §5.2)
         test_mailbox_changes(client, config, results)
+
+        # Email/set E2E Tests (RFC 8620 §5.3 and RFC 8621 §4.6)
+        test_email_set_mailbox_changes(client, config, results)
+        test_email_set_counter_updates(client, config, results)
+        test_email_set_state_tracking(client, config, results)
 
     # Print summary
     print_summary(results)
