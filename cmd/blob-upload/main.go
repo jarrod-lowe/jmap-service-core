@@ -314,9 +314,9 @@ func getContentType(headers map[string]string) string {
 }
 
 // isIAMAuthenticatedRequest checks if the request is IAM-authenticated
-// by looking at the path (contains /upload-iam/)
+// by checking if UserArn is populated in the request context
 func isIAMAuthenticatedRequest(request events.APIGatewayProxyRequest) bool {
-	return strings.Contains(request.Path, "/upload-iam/")
+	return request.RequestContext.Identity.UserArn != ""
 }
 
 // extractCallerPrincipal extracts the caller's IAM principal ARN from the request

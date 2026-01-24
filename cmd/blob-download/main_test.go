@@ -619,7 +619,7 @@ func TestDownload_IAMAuthUsesPathAccountId(t *testing.T) {
 	db := &mockBlobDB{blob: blob}
 	signer := &mockURLSigner{signedURL: "https://signed-url"}
 	secrets := &mockSecretsReader{}
-	setupTestDeps(db, signer, secrets)
+	setupTestDepsWithPrincipals(db, signer, secrets, []string{"arn:aws:iam::123456789012:role/ingestion-role"})
 
 	// IAM auth - detected via Identity.UserArn (authoritative signal)
 	request := events.APIGatewayProxyRequest{

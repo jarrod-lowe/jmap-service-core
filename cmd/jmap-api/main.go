@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
@@ -269,9 +268,9 @@ func processMethodCall(ctx context.Context, accountID string, call []any, index 
 }
 
 // isIAMAuthenticatedRequest checks if the request is IAM-authenticated
-// by looking at the path (contains /jmap-iam/)
+// by checking if UserArn is populated in the request context
 func isIAMAuthenticatedRequest(request events.APIGatewayProxyRequest) bool {
-	return strings.Contains(request.Path, "/jmap-iam/")
+	return request.RequestContext.Identity.UserArn != ""
 }
 
 // extractCallerPrincipal extracts the caller's IAM principal ARN from the request
