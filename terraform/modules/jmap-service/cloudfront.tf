@@ -25,12 +25,15 @@ resource "aws_acm_certificate_validation" "api" {
   }
 }
 
-# CloudFront Function for JMAP redirect
+# CloudFront Function for JMAP path rewrite
+# Rewrites /.well-known/jmap to /{stage}/.well-known/jmap for API Gateway
 resource "aws_cloudfront_function" "jmap_redirect" {
   name    = "jmap-well-known-redirect-${var.environment}"
   runtime = "cloudfront-js-2.0"
   publish = true
-  code    = file("${path.module}/cloudfront-functions/jmap-redirect.js")
+  code = templatefile("${path.module}/cloudfront-functions/jmap-path-rewrite.js.tftpl", {
+    stage_name = aws_api_gateway_stage.v1.stage_name
+  })
 }
 
 # CloudFront Function for blob path rewrite
@@ -100,7 +103,7 @@ resource "aws_cloudfront_distribution" "api" {
   origin {
     domain_name = "${aws_api_gateway_rest_api.api.id}.execute-api.${var.aws_region}.amazonaws.com"
     origin_id   = "api-gateway"
-    # Note: No origin_path - clients access /v1/.well-known/jmap directly after redirect
+    # Note: No origin_path - CloudFront functions rewrite paths to add stage prefix
 
     custom_origin_config {
       http_port              = 80
@@ -140,16 +143,18 @@ resource "aws_cloudfront_distribution" "api" {
     }
   }
 
-  # Redirect /.well-known/jmap to /v1/.well-known/jmap
+  # Rewrite /.well-known/jmap to /{stage}/.well-known/jmap (adds API Gateway stage prefix)
   ordered_cache_behavior {
     path_pattern           = "/.well-known/jmap"
     target_origin_id       = "api-gateway"
     viewer_protocol_policy = "redirect-to-https"
-    allowed_methods        = ["GET", "HEAD"]
+    allowed_methods        = ["GET", "HEAD", "OPTIONS"]
     cached_methods         = ["GET", "HEAD"]
     compress               = true
 
-    cache_policy_id = data.aws_cloudfront_cache_policy.caching_disabled.id
+    cache_policy_id            = data.aws_cloudfront_cache_policy.caching_disabled.id
+    origin_request_policy_id   = data.aws_cloudfront_origin_request_policy.all_viewer_except_host_header.id
+    response_headers_policy_id = data.aws_cloudfront_response_headers_policy.cors_preflight.id
 
     function_association {
       event_type   = "viewer-request"
@@ -165,8 +170,9 @@ resource "aws_cloudfront_distribution" "api" {
     compress               = true
 
     # Disable caching for API responses
-    cache_policy_id          = data.aws_cloudfront_cache_policy.caching_disabled.id
-    origin_request_policy_id = data.aws_cloudfront_origin_request_policy.all_viewer_except_host_header.id
+    cache_policy_id            = data.aws_cloudfront_cache_policy.caching_disabled.id
+    origin_request_policy_id   = data.aws_cloudfront_origin_request_policy.all_viewer_except_host_header.id
+    response_headers_policy_id = data.aws_cloudfront_response_headers_policy.cors_preflight.id
   }
 
   viewer_certificate {
@@ -199,4 +205,8 @@ data "aws_cloudfront_cache_policy" "caching_optimized" {
 
 data "aws_cloudfront_origin_request_policy" "all_viewer_except_host_header" {
   name = "Managed-AllViewerExceptHostHeader"
+}
+
+data "aws_cloudfront_response_headers_policy" "cors_preflight" {
+  name = "Managed-CORS-With-Preflight"
 }

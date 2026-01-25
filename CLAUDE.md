@@ -26,6 +26,14 @@ The `docs/` directory contains the official JMAP RFCs for reference:
 
 We will use a Makefile for presenting all the operations to the use (such as plans, cleans, applies, etc). Terraform will be used for infrastructure. See `../ses-mail` for an example of a project using those.
 
+**Getting a bearer token for JMAP clients:**
+
+```bash
+AWS_PROFILE=ses-mail make get-token ENV=test
+```
+
+This outputs a Cognito JWT token for the test user, which can be used with JMAP clients like jmap-demo-webmail.
+
 ## Architecture Overview
 
 ### High-Level Components

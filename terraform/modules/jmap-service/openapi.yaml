@@ -64,6 +64,33 @@ paths:
         httpMethod: POST
         uri: "arn:aws:apigateway:${aws_region}:lambda:path/2015-03-31/functions/${get_jmap_session_lambda_arn}/invocations"
         passthroughBehavior: when_no_match
+    options:
+      summary: "CORS preflight for JMAP Session Discovery"
+      operationId: "optionsJmapSession"
+      responses:
+        "204":
+          description: "CORS preflight response"
+          headers:
+            Access-Control-Allow-Origin:
+              schema:
+                type: string
+            Access-Control-Allow-Methods:
+              schema:
+                type: string
+            Access-Control-Allow-Headers:
+              schema:
+                type: string
+      x-amazon-apigateway-integration:
+        type: mock
+        requestTemplates:
+          application/json: '{"statusCode": 204}'
+        responses:
+          default:
+            statusCode: "204"
+            responseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
   /jmap:
     post:
       summary: "JMAP API"
@@ -105,6 +132,33 @@ paths:
         httpMethod: POST
         uri: "arn:aws:apigateway:${aws_region}:lambda:path/2015-03-31/functions/${jmap_api_lambda_arn}/invocations"
         passthroughBehavior: when_no_match
+    options:
+      summary: "CORS preflight for JMAP API"
+      operationId: "optionsJmap"
+      responses:
+        "204":
+          description: "CORS preflight response"
+          headers:
+            Access-Control-Allow-Origin:
+              schema:
+                type: string
+            Access-Control-Allow-Methods:
+              schema:
+                type: string
+            Access-Control-Allow-Headers:
+              schema:
+                type: string
+      x-amazon-apigateway-integration:
+        type: mock
+        requestTemplates:
+          application/json: '{"statusCode": 204}'
+        responses:
+          default:
+            statusCode: "204"
+            responseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
   /jmap-iam/{accountId}:
     post:
       summary: "JMAP API (IAM Auth)"

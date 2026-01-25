@@ -1,0 +1,11 @@
+// CloudFront function to rewrite /.well-known/jmap path for API Gateway
+// Adds stage prefix so /.well-known/jmap becomes /${stage_name}/.well-known/jmap
+function handler(event) {
+  var request = event.request;
+
+  if (request.uri === '/.well-known/jmap') {
+    request.uri = '/${stage_name}/.well-known/jmap';
+  }
+
+  return request;
+}

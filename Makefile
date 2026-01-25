@@ -1,4 +1,4 @@
-.PHONY: help deps build build-all package package-all test test-go test-cloudfront integration-test jmap-client-test lint init plan show-plan apply plan-destroy destroy clean clean-all fmt validate outputs restore-tfvars help-tfvars invalidate-cache
+.PHONY: help deps build build-all package package-all test test-go test-cloudfront integration-test jmap-client-test lint init plan show-plan apply plan-destroy destroy clean clean-all fmt validate outputs restore-tfvars help-tfvars invalidate-cache get-token
 
 # Environment selection (test or prod)
 ENV ?= test
@@ -49,6 +49,7 @@ help:
 	@echo "  make test-cloudfront         - Run CloudFront function tests only"
 	@echo "  make integration-test ENV=<env> - Run integration tests against deployed env"
 	@echo "  make jmap-client-test ENV=<env> - Run JMAP protocol compliance tests (jmapc)"
+	@echo "  make get-token ENV=<env>     - Get Cognito JWT token for test user"
 	@echo "  make lint                    - Run golangci-lint (required)"
 	@echo ""
 	@echo "Terraform Commands:"
@@ -299,3 +300,20 @@ invalidate-cache: $(ENV_DIR)/.terraform
 		--paths "/*" \
 		--output text; \
 	echo "✓ Cache invalidation initiated"
+
+# Get Cognito JWT token for test user
+get-token: $(ENV_DIR)/.terraform
+	@cd $(ENV_DIR) && \
+	USER_POOL_ID=$$(terraform output -raw cognito_user_pool_id) && \
+	CLIENT_ID=$$(terraform output -raw cognito_client_id) && \
+	REGION=$$(echo "$$USER_POOL_ID" | cut -d'_' -f1) && \
+	USERNAME=$$(yq ".env.$(ENV).username" ../../../test-user.yaml) && \
+	PASSWORD=$$(yq ".env.$(ENV).password" ../../../test-user.yaml) && \
+	aws cognito-idp admin-initiate-auth \
+		--user-pool-id "$$USER_POOL_ID" \
+		--client-id "$$CLIENT_ID" \
+		--auth-flow ADMIN_NO_SRP_AUTH \
+		--auth-parameters "USERNAME=$$USERNAME,PASSWORD=$$PASSWORD" \
+		--region "$$REGION" \
+		--query 'AuthenticationResult.IdToken' \
+		--output text
