@@ -2496,8 +2496,348 @@ def test_mailbox_state_changes_on_seen_keyword_update(
 
 
 # =============================================================================
+# Test: Invalid Patch Errors (RFC 8620 Section 5.3)
+# =============================================================================
+
+
+def test_invalid_patch_non_existent_property(
+    api_url: str,
+    upload_url: str,
+    token: str,
+    account_id: str,
+    results,
+):
+    """
+    Test: Patch to non-existent property returns invalidPatch/invalidProperties.
+
+    RFC 8620 Section 5.3: Invalid patch paths must be rejected.
+    """
+    print()
+    print("Test: Invalid patch to non-existent property (RFC 8620 Section 5.3)...")
+
+    # Create mailbox and import email
+    mailbox_id = create_test_mailbox(api_url, token, account_id)
+    if not mailbox_id:
+        results.record_fail(
+            "Invalid patch test setup", "Failed to create mailbox"
+        )
+        return
+
+    email_id = import_test_email(api_url, upload_url, token, account_id, mailbox_id)
+    if not email_id:
+        results.record_fail(
+            "Invalid patch test setup", "Failed to import email"
+        )
+        return
+
+    # Attempt patch with non-existent property path
+    try:
+        response = email_set_update(
+            api_url,
+            token,
+            account_id,
+            email_id,
+            {"nonExistent/foo": True},
+        )
+    except Exception as e:
+        results.record_fail("Invalid patch Email/set request", str(e))
+        return
+
+    if "methodResponses" not in response:
+        results.record_fail(
+            "Invalid patch response", f"No methodResponses: {response}"
+        )
+        return
+
+    method_responses = response["methodResponses"]
+    if len(method_responses) == 0:
+        results.record_fail("Invalid patch response", "Empty methodResponses")
+        return
+
+    response_name, response_data, _ = method_responses[0]
+
+    if response_name == "error":
+        # Method-level error - acceptable
+        error_type = response_data.get("type")
+        results.record_pass(
+            "Invalid patch to non-existent property rejected",
+            f"Method error: {error_type}",
+        )
+        return
+
+    if response_name != "Email/set":
+        results.record_fail(
+            "Invalid patch response", f"Unexpected method: {response_name}"
+        )
+        return
+
+    # Check for notUpdated with appropriate error
+    not_updated = response_data.get("notUpdated", {})
+    updated = response_data.get("updated", {})
+
+    if email_id in not_updated:
+        error = not_updated[email_id]
+        error_type = error.get("type")
+        # Either invalidPatch or invalidProperties is acceptable per RFC 8620
+        if error_type in ("invalidPatch", "invalidProperties"):
+            results.record_pass(
+                "Invalid patch to non-existent property rejected",
+                f"Error type: {error_type}: {error.get('description', '')}",
+            )
+        else:
+            results.record_pass(
+                "Invalid patch rejected with error",
+                f"Error type: {error_type}: {error.get('description', '')}",
+            )
+    elif email_id in updated:
+        results.record_fail(
+            "Invalid patch to non-existent property rejected",
+            "Update succeeded when it should have failed",
+        )
+    else:
+        results.record_fail(
+            "Invalid patch response",
+            f"Email not in updated or notUpdated: {response_data}",
+        )
+
+
+def test_invalid_patch_nested_non_existent_path(
+    api_url: str,
+    upload_url: str,
+    token: str,
+    account_id: str,
+    results,
+):
+    """
+    Test: Patch to nested path that doesn't exist returns error.
+
+    RFC 8620 Section 5.3: "All parts prior to the last MUST already exist
+    on the object being patched."
+    """
+    print()
+    print("Test: Invalid patch to nested non-existent path (RFC 8620 Section 5.3)...")
+
+    # Create mailbox and import email
+    mailbox_id = create_test_mailbox(api_url, token, account_id)
+    if not mailbox_id:
+        results.record_fail(
+            "Nested invalid patch test setup", "Failed to create mailbox"
+        )
+        return
+
+    email_id = import_test_email(api_url, upload_url, token, account_id, mailbox_id)
+    if not email_id:
+        results.record_fail(
+            "Nested invalid patch test setup", "Failed to import email"
+        )
+        return
+
+    # Attempt patch with nested path that doesn't exist
+    # keywords is a valid property, but keywords/nested/deep is not valid
+    try:
+        response = email_set_update(
+            api_url,
+            token,
+            account_id,
+            email_id,
+            {"keywords/nested/deep": True},
+        )
+    except Exception as e:
+        results.record_fail("Nested invalid patch Email/set request", str(e))
+        return
+
+    if "methodResponses" not in response:
+        results.record_fail(
+            "Nested invalid patch response", f"No methodResponses: {response}"
+        )
+        return
+
+    method_responses = response["methodResponses"]
+    if len(method_responses) == 0:
+        results.record_fail("Nested invalid patch response", "Empty methodResponses")
+        return
+
+    response_name, response_data, _ = method_responses[0]
+
+    if response_name == "error":
+        # Method-level error - acceptable
+        error_type = response_data.get("type")
+        results.record_pass(
+            "Invalid nested patch path rejected",
+            f"Method error: {error_type}",
+        )
+        return
+
+    if response_name != "Email/set":
+        results.record_fail(
+            "Nested invalid patch response", f"Unexpected method: {response_name}"
+        )
+        return
+
+    # Check for notUpdated with appropriate error
+    not_updated = response_data.get("notUpdated", {})
+    updated = response_data.get("updated", {})
+
+    if email_id in not_updated:
+        error = not_updated[email_id]
+        error_type = error.get("type")
+        # Either invalidPatch or invalidProperties is acceptable
+        if error_type in ("invalidPatch", "invalidProperties"):
+            results.record_pass(
+                "Invalid nested patch path rejected",
+                f"Error type: {error_type}: {error.get('description', '')}",
+            )
+        else:
+            results.record_pass(
+                "Invalid nested patch rejected with error",
+                f"Error type: {error_type}: {error.get('description', '')}",
+            )
+    elif email_id in updated:
+        results.record_fail(
+            "Invalid nested patch path rejected",
+            "Update succeeded when it should have failed",
+        )
+    else:
+        results.record_fail(
+            "Nested invalid patch response",
+            f"Email not in updated or notUpdated: {response_data}",
+        )
+
+
+def test_invalid_patch_immutable_property(
+    api_url: str,
+    upload_url: str,
+    token: str,
+    account_id: str,
+    results,
+):
+    """
+    Test: Patch to server-set/immutable property returns invalidProperties.
+
+    RFC 8621 Section 4: id and receivedAt are server-set properties that
+    cannot be modified after creation.
+    """
+    print()
+    print("Test: Invalid patch to immutable property (RFC 8621 Section 4)...")
+
+    # Create mailbox and import email
+    mailbox_id = create_test_mailbox(api_url, token, account_id)
+    if not mailbox_id:
+        results.record_fail(
+            "Immutable property patch test setup", "Failed to create mailbox"
+        )
+        return
+
+    email_id = import_test_email(api_url, upload_url, token, account_id, mailbox_id)
+    if not email_id:
+        results.record_fail(
+            "Immutable property patch test setup", "Failed to import email"
+        )
+        return
+
+    # Attempt to patch the immutable 'receivedAt' property
+    try:
+        response = email_set_update(
+            api_url,
+            token,
+            account_id,
+            email_id,
+            {"receivedAt": "2020-01-01T00:00:00Z"},
+        )
+    except Exception as e:
+        results.record_fail("Immutable property patch Email/set request", str(e))
+        return
+
+    if "methodResponses" not in response:
+        results.record_fail(
+            "Immutable property patch response", f"No methodResponses: {response}"
+        )
+        return
+
+    method_responses = response["methodResponses"]
+    if len(method_responses) == 0:
+        results.record_fail("Immutable property patch response", "Empty methodResponses")
+        return
+
+    response_name, response_data, _ = method_responses[0]
+
+    if response_name == "error":
+        # Method-level error - acceptable
+        error_type = response_data.get("type")
+        results.record_pass(
+            "Patch to immutable property rejected",
+            f"Method error: {error_type}",
+        )
+        return
+
+    if response_name != "Email/set":
+        results.record_fail(
+            "Immutable property patch response", f"Unexpected method: {response_name}"
+        )
+        return
+
+    # Check for notUpdated with appropriate error
+    not_updated = response_data.get("notUpdated", {})
+    updated = response_data.get("updated", {})
+
+    if email_id in not_updated:
+        error = not_updated[email_id]
+        error_type = error.get("type")
+        # invalidProperties is the expected error for server-set properties
+        if error_type == "invalidProperties":
+            results.record_pass(
+                "Patch to immutable property rejected with invalidProperties",
+                f"Error: {error.get('description', '')}",
+            )
+        else:
+            results.record_pass(
+                "Patch to immutable property rejected",
+                f"Error type: {error_type}: {error.get('description', '')}",
+            )
+    elif email_id in updated:
+        results.record_fail(
+            "Patch to immutable property rejected",
+            "Update succeeded when it should have failed (receivedAt is immutable)",
+        )
+    else:
+        results.record_fail(
+            "Immutable property patch response",
+            f"Email not in updated or notUpdated: {response_data}",
+        )
+
+
+# =============================================================================
 # Main Entry Functions
 # =============================================================================
+
+
+def test_email_set_invalid_patches(client, config, results):
+    """Test Email/set rejects invalid patches (RFC 8620 Section 5.3)."""
+    print()
+    print("=" * 40)
+    print("Testing Email/set invalid patches (RFC 8620 Section 5.3)...")
+    print("=" * 40)
+
+    session = client.jmap_session
+
+    try:
+        account_id = client.account_id
+    except Exception as e:
+        results.record_fail("Email/set invalid patches setup", f"No account ID: {e}")
+        return
+
+    api_url = session.api_url
+    upload_url = session.upload_url
+
+    test_invalid_patch_non_existent_property(
+        api_url, upload_url, config.token, account_id, results
+    )
+    test_invalid_patch_nested_non_existent_path(
+        api_url, upload_url, config.token, account_id, results
+    )
+    test_invalid_patch_immutable_property(
+        api_url, upload_url, config.token, account_id, results
+    )
 
 
 def test_email_set_mailbox_changes(client, config, results):
