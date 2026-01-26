@@ -129,3 +129,9 @@ func (r *Registry) IsAllowedPrincipal(callerARN string) bool {
 	}
 	return IsAllowedARN(registeredARNs, callerARN)
 }
+
+// AddMethod adds a method target to the registry.
+// This is primarily for testing.
+func (r *Registry) AddMethod(method string, target MethodTarget) {
+	r.methodMap[method] = target
+}

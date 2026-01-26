@@ -257,7 +257,7 @@ func TestProcessMethodCall_InvalidCallStructure_ReturnsError(t *testing.T) {
 
 	// Call with wrong number of elements
 	call := []any{"method", "not-an-object"}
-	result := processMethodCall(ctx, "user-123", call, 0, "req-123")
+	result := processMethodCall(ctx, "user-123", call, 0, "req-123", nil)
 
 	if result[0] != "error" {
 		t.Errorf("expected error response, got '%v'", result[0])
@@ -269,7 +269,7 @@ func TestProcessMethodCall_NonStringMethodName_ReturnsError(t *testing.T) {
 	ctx := context.Background()
 
 	call := []any{123, map[string]any{}, "c0"}
-	result := processMethodCall(ctx, "user-123", call, 0, "req-123")
+	result := processMethodCall(ctx, "user-123", call, 0, "req-123", nil)
 
 	if result[0] != "error" {
 		t.Errorf("expected error response, got '%v'", result[0])
@@ -405,5 +405,333 @@ func TestHandler_IAMAuth_AssumedRole_MatchesRegisteredRole(t *testing.T) {
 
 	if response.StatusCode != 200 {
 		t.Errorf("expected status code 200, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+}
+
+// setupTestDepsWithMethods creates test deps with mock methods for result reference testing
+func setupTestDepsWithMethods(invoker *mockInvoker) {
+	tp := noop.NewTracerProvider()
+	otel.SetTracerProvider(tp)
+
+	registry := plugin.NewRegistry()
+	registry.AddMethod("Email/query", plugin.MethodTarget{
+		InvocationType: "lambda-invoke",
+		InvokeTarget:   "arn:aws:lambda:us-east-1:123456789012:function:email-query",
+	})
+	registry.AddMethod("Email/get", plugin.MethodTarget{
+		InvocationType: "lambda-invoke",
+		InvokeTarget:   "arn:aws:lambda:us-east-1:123456789012:function:email-get",
+	})
+
+	deps = &Dependencies{
+		Registry: registry,
+		Invoker:  invoker,
+	}
+}
+
+func TestHandler_ResultReference_SimplePath_Resolves(t *testing.T) {
+	// Mock invoker that returns proper responses
+	var capturedGetArgs map[string]any
+	invoker := &mockInvoker{
+		invokeFunc: func(ctx context.Context, target plugin.MethodTarget, request plugin.PluginInvocationRequest) (*plugin.PluginInvocationResponse, error) {
+			if request.Method == "Email/query" {
+				return &plugin.PluginInvocationResponse{
+					MethodResponse: plugin.MethodResponse{
+						Name: "Email/query",
+						Args: map[string]any{
+							"accountId": request.AccountID,
+							"ids":       []any{"email1", "email2", "email3"},
+						},
+						ClientID: request.ClientID,
+					},
+				}, nil
+			}
+			// Email/get - capture the resolved args
+			capturedGetArgs = request.Args
+			return &plugin.PluginInvocationResponse{
+				MethodResponse: plugin.MethodResponse{
+					Name:     "Email/get",
+					Args:     map[string]any{"accountId": request.AccountID, "list": []any{}},
+					ClientID: request.ClientID,
+				},
+			}, nil
+		},
+	}
+
+	setupTestDepsWithMethods(invoker)
+	ctx := context.Background()
+
+	// Request with result reference: Email/get references Email/query's ids
+	request := events.APIGatewayProxyRequest{
+		Body: `{
+			"using":[],
+			"methodCalls":[
+				["Email/query",{"accountId":"user-123"},"query0"],
+				["Email/get",{"accountId":"user-123","#ids":{"resultOf":"query0","name":"Email/query","path":"/ids"}},"get0"]
+			]
+		}`,
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "test-request-id",
+			Authorizer: map[string]any{
+				"claims": map[string]any{
+					"sub": "user-123",
+				},
+			},
+		},
+	}
+
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	if response.StatusCode != 200 {
+		t.Errorf("expected status code 200, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+
+	// Verify the Email/get was called with resolved ids
+	if capturedGetArgs == nil {
+		t.Fatal("Email/get was not called")
+	}
+
+	ids, ok := capturedGetArgs["ids"]
+	if !ok {
+		t.Fatal("expected 'ids' key in captured args")
+	}
+
+	idsSlice, ok := ids.([]any)
+	if !ok {
+		t.Fatalf("expected ids to be []any, got %T", ids)
+	}
+
+	if len(idsSlice) != 3 {
+		t.Errorf("expected 3 ids, got %d", len(idsSlice))
+	}
+}
+
+func TestHandler_ResultReference_WildcardPath_Resolves(t *testing.T) {
+	var capturedGetArgs map[string]any
+	invoker := &mockInvoker{
+		invokeFunc: func(ctx context.Context, target plugin.MethodTarget, request plugin.PluginInvocationRequest) (*plugin.PluginInvocationResponse, error) {
+			if request.Method == "Email/query" {
+				return &plugin.PluginInvocationResponse{
+					MethodResponse: plugin.MethodResponse{
+						Name: "Email/query",
+						Args: map[string]any{
+							"accountId": request.AccountID,
+							"list": []any{
+								map[string]any{"id": "email1", "threadId": "thread1"},
+								map[string]any{"id": "email2", "threadId": "thread2"},
+							},
+						},
+						ClientID: request.ClientID,
+					},
+				}, nil
+			}
+			capturedGetArgs = request.Args
+			return &plugin.PluginInvocationResponse{
+				MethodResponse: plugin.MethodResponse{
+					Name:     "Email/get",
+					Args:     map[string]any{"accountId": request.AccountID, "list": []any{}},
+					ClientID: request.ClientID,
+				},
+			}, nil
+		},
+	}
+
+	setupTestDepsWithMethods(invoker)
+	ctx := context.Background()
+
+	// Request with wildcard result reference
+	request := events.APIGatewayProxyRequest{
+		Body: `{
+			"using":[],
+			"methodCalls":[
+				["Email/query",{"accountId":"user-123"},"query0"],
+				["Email/get",{"accountId":"user-123","#ids":{"resultOf":"query0","name":"Email/query","path":"/list/*/id"}},"get0"]
+			]
+		}`,
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "test-request-id",
+			Authorizer: map[string]any{
+				"claims": map[string]any{
+					"sub": "user-123",
+				},
+			},
+		},
+	}
+
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	if response.StatusCode != 200 {
+		t.Errorf("expected status code 200, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+
+	if capturedGetArgs == nil {
+		t.Fatal("Email/get was not called")
+	}
+
+	ids, ok := capturedGetArgs["ids"]
+	if !ok {
+		t.Fatal("expected 'ids' key in captured args")
+	}
+
+	idsSlice, ok := ids.([]any)
+	if !ok {
+		t.Fatalf("expected ids to be []any, got %T", ids)
+	}
+
+	if len(idsSlice) != 2 {
+		t.Errorf("expected 2 ids, got %d", len(idsSlice))
+	}
+
+	if idsSlice[0] != "email1" || idsSlice[1] != "email2" {
+		t.Errorf("expected [email1, email2], got %v", idsSlice)
+	}
+}
+
+func TestHandler_ResultReference_InvalidReference_ReturnsError(t *testing.T) {
+	invoker := &mockInvoker{
+		invokeFunc: func(ctx context.Context, target plugin.MethodTarget, request plugin.PluginInvocationRequest) (*plugin.PluginInvocationResponse, error) {
+			return &plugin.PluginInvocationResponse{
+				MethodResponse: plugin.MethodResponse{
+					Name:     request.Method,
+					Args:     map[string]any{"accountId": request.AccountID},
+					ClientID: request.ClientID,
+				},
+			}, nil
+		},
+	}
+
+	setupTestDepsWithMethods(invoker)
+	ctx := context.Background()
+
+	// Request with invalid result reference (resultOf doesn't exist)
+	request := events.APIGatewayProxyRequest{
+		Body: `{
+			"using":[],
+			"methodCalls":[
+				["Email/get",{"accountId":"user-123","#ids":{"resultOf":"nonexistent","name":"Email/query","path":"/ids"}},"get0"]
+			]
+		}`,
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "test-request-id",
+			Authorizer: map[string]any{
+				"claims": map[string]any{
+					"sub": "user-123",
+				},
+			},
+		},
+	}
+
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	// Should still return 200, but with error response
+	if response.StatusCode != 200 {
+		t.Errorf("expected status code 200, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+
+	var jmapResp JMAPResponse
+	if err := json.Unmarshal([]byte(response.Body), &jmapResp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if len(jmapResp.MethodResponses) != 1 {
+		t.Fatalf("expected 1 method response, got %d", len(jmapResp.MethodResponses))
+	}
+
+	respName, ok := jmapResp.MethodResponses[0][0].(string)
+	if !ok || respName != "error" {
+		t.Errorf("expected error response, got '%v'", jmapResp.MethodResponses[0][0])
+	}
+
+	respArgs, ok := jmapResp.MethodResponses[0][1].(map[string]any)
+	if !ok {
+		t.Fatalf("expected args to be a map")
+	}
+
+	errorType, ok := respArgs["type"].(string)
+	if !ok || errorType != "invalidResultReference" {
+		t.Errorf("expected error type 'invalidResultReference', got '%v'", respArgs["type"])
+	}
+}
+
+func TestHandler_ResultReference_ConflictingKeys_ReturnsError(t *testing.T) {
+	invoker := &mockInvoker{
+		invokeFunc: func(ctx context.Context, target plugin.MethodTarget, request plugin.PluginInvocationRequest) (*plugin.PluginInvocationResponse, error) {
+			return &plugin.PluginInvocationResponse{
+				MethodResponse: plugin.MethodResponse{
+					Name: "Email/query",
+					Args: map[string]any{
+						"accountId": request.AccountID,
+						"ids":       []any{"email1"},
+					},
+					ClientID: request.ClientID,
+				},
+			}, nil
+		},
+	}
+
+	setupTestDepsWithMethods(invoker)
+	ctx := context.Background()
+
+	// Request with both "ids" and "#ids" - should be an error
+	request := events.APIGatewayProxyRequest{
+		Body: `{
+			"using":[],
+			"methodCalls":[
+				["Email/query",{"accountId":"user-123"},"query0"],
+				["Email/get",{"accountId":"user-123","ids":["existing"],"#ids":{"resultOf":"query0","name":"Email/query","path":"/ids"}},"get0"]
+			]
+		}`,
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "test-request-id",
+			Authorizer: map[string]any{
+				"claims": map[string]any{
+					"sub": "user-123",
+				},
+			},
+		},
+	}
+
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	if response.StatusCode != 200 {
+		t.Errorf("expected status code 200, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+
+	var jmapResp JMAPResponse
+	if err := json.Unmarshal([]byte(response.Body), &jmapResp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	// First response should be Email/query success
+	if len(jmapResp.MethodResponses) != 2 {
+		t.Fatalf("expected 2 method responses, got %d", len(jmapResp.MethodResponses))
+	}
+
+	// Second response should be error for conflicting keys
+	respName, ok := jmapResp.MethodResponses[1][0].(string)
+	if !ok || respName != "error" {
+		t.Errorf("expected error response for second call, got '%v'", jmapResp.MethodResponses[1][0])
+	}
+
+	respArgs, ok := jmapResp.MethodResponses[1][1].(map[string]any)
+	if !ok {
+		t.Fatalf("expected args to be a map")
+	}
+
+	errorType, ok := respArgs["type"].(string)
+	if !ok || errorType != "invalidArguments" {
+		t.Errorf("expected error type 'invalidArguments', got '%v'", respArgs["type"])
 	}
 }

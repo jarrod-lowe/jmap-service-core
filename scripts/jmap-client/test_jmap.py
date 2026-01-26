@@ -33,6 +33,7 @@ from test_email_set import (
     test_email_set_invalid_patches,
 )
 from test_thread import test_thread_operations
+from test_result_references import test_result_references
 
 
 class Colors:
@@ -1577,6 +1578,9 @@ def main():
 
         # Email/get header:{name} property tests (RFC 8621 §4.1.3)
         test_header_properties(client, config, results)
+
+        # Result References tests (RFC 8620 §3.7)
+        test_result_references(client, config, results)
 
     # Print summary
     print_summary(results)

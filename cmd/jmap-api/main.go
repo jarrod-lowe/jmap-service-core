@@ -13,6 +13,7 @@ import (
 	lambdasvc "github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/jarrod-lowe/jmap-service-core/internal/db"
 	"github.com/jarrod-lowe/jmap-service-core/internal/plugin"
+	"github.com/jarrod-lowe/jmap-service-core/internal/resultref"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda/xrayconfig"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
@@ -123,11 +124,14 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 		}
 	}
 
-	// Process method calls
+	// Process method calls with result reference tracking
 	methodResponses := make([][]any, 0, len(jmapReq.MethodCalls))
+	trackedResponses := make([]resultref.MethodResponse, 0, len(jmapReq.MethodCalls))
 	for i, call := range jmapReq.MethodCalls {
-		resp := processMethodCall(ctx, accountID, call, i, request.RequestContext.RequestID)
+		resp := processMethodCall(ctx, accountID, call, i, request.RequestContext.RequestID, trackedResponses)
 		methodResponses = append(methodResponses, resp)
+		// Track response for future result references
+		trackedResponses = append(trackedResponses, toMethodResponse(resp))
 	}
 
 	// Build response
@@ -188,7 +192,7 @@ func extractAccountID(request events.APIGatewayProxyRequest) (string, error) {
 }
 
 // processMethodCall dispatches a method call to the appropriate plugin
-func processMethodCall(ctx context.Context, accountID string, call []any, index int, requestID string) []any {
+func processMethodCall(ctx context.Context, accountID string, call []any, index int, requestID string, previousResponses []resultref.MethodResponse) []any {
 	// Validate call structure: [methodName, args, clientId]
 	if len(call) != 3 {
 		return []any{"error", map[string]any{
@@ -218,6 +222,22 @@ func processMethodCall(ctx context.Context, accountID string, call []any, index 
 		clientID = ""
 	}
 
+	// Resolve result references (RFC 8620 Section 3.7)
+	resolvedArgs, err := resultref.ResolveArgs(args, previousResponses)
+	if err != nil {
+		resolveErr, ok := err.(*resultref.ResolveError)
+		if ok {
+			return []any{"error", map[string]any{
+				"type":        string(resolveErr.Type),
+				"description": resolveErr.Description,
+			}, clientID}
+		}
+		return []any{"error", map[string]any{
+			"type":        "serverFail",
+			"description": "Failed to resolve result references",
+		}, clientID}
+	}
+
 	// Look up method target
 	target := deps.Registry.GetMethodTarget(methodName)
 	if target == nil {
@@ -227,7 +247,7 @@ func processMethodCall(ctx context.Context, accountID string, call []any, index 
 	}
 
 	// Validate accountId in args matches authenticated accountId
-	if argsAccountID, ok := args["accountId"].(string); ok {
+	if argsAccountID, ok := resolvedArgs["accountId"].(string); ok {
 		if argsAccountID != accountID {
 			return []any{"error", map[string]any{
 				"type":        "accountNotFound",
@@ -242,7 +262,7 @@ func processMethodCall(ctx context.Context, accountID string, call []any, index 
 		CallIndex: index,
 		AccountID: accountID,
 		Method:    methodName,
-		Args:      args,
+		Args:      resolvedArgs,
 		ClientID:  clientID,
 	}
 
@@ -264,6 +284,29 @@ func processMethodCall(ctx context.Context, accountID string, call []any, index 
 		pluginResp.MethodResponse.Name,
 		pluginResp.MethodResponse.Args,
 		pluginResp.MethodResponse.ClientID,
+	}
+}
+
+// toMethodResponse converts a JMAP method response array to a MethodResponse struct for tracking
+func toMethodResponse(resp []any) resultref.MethodResponse {
+	var name string
+	var args map[string]any
+	var clientID string
+
+	if len(resp) >= 1 {
+		name, _ = resp[0].(string)
+	}
+	if len(resp) >= 2 {
+		args, _ = resp[1].(map[string]any)
+	}
+	if len(resp) >= 3 {
+		clientID, _ = resp[2].(string)
+	}
+
+	return resultref.MethodResponse{
+		Name:     name,
+		Args:     args,
+		ClientID: clientID,
 	}
 }
 
