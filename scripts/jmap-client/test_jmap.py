@@ -24,6 +24,7 @@ from jmapc.methods import CoreEcho, EmailGet, EmailQuery
 
 from test_changes import test_email_changes, test_mailbox_changes, test_thread_changes
 from test_email import setup_query_test_data, test_email_import_and_get
+from test_email_headers import test_header_properties
 from test_email_set import (
     test_email_set_mailbox_changes,
     test_email_set_counter_updates,
@@ -1573,6 +1574,9 @@ def main():
         test_email_set_state_tracking(client, config, results)
         test_email_set_keyword_updates(client, config, results)
         test_email_set_invalid_patches(client, config, results)
+
+        # Email/get header:{name} property tests (RFC 8621 §4.1.3)
+        test_header_properties(client, config, results)
 
     # Print summary
     print_summary(results)
