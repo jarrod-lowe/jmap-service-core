@@ -48,7 +48,10 @@ func ResolveArgs(args map[string]any, responses []MethodResponse) (map[string]an
 			if err != nil {
 				return nil, err
 			}
-			result[resolvedKey] = resolvedValue
+			// Per RFC 8620, null means "omit the property" — don't include the key
+			if resolvedValue != nil {
+				result[resolvedKey] = resolvedValue
+			}
 		} else {
 			result[key] = value
 		}

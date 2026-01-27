@@ -96,6 +96,34 @@ func TestEvaluatePath_RootDocument(t *testing.T) {
 	}
 }
 
+func TestEvaluatePath_NullValue(t *testing.T) {
+	// A key that exists with an explicit nil value should return (nil, nil)
+	data := map[string]any{
+		"updatedProperties": nil,
+		"ids":               []any{"id1"},
+	}
+
+	result, err := EvaluatePath(data, "/updatedProperties")
+	if err != nil {
+		t.Fatalf("expected no error for null value, got: %v", err)
+	}
+	if result != nil {
+		t.Errorf("expected nil result for null value, got: %v", result)
+	}
+}
+
+func TestEvaluatePath_MissingKey(t *testing.T) {
+	// A key that does not exist should return an error
+	data := map[string]any{
+		"ids": []any{"id1"},
+	}
+
+	_, err := EvaluatePath(data, "/nonexistent")
+	if err == nil {
+		t.Error("expected error for missing key, got nil")
+	}
+}
+
 func TestEvaluatePath_InvalidPath_ReturnsError(t *testing.T) {
 	data := map[string]any{
 		"ids": []any{"id1"},

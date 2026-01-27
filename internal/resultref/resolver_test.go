@@ -252,6 +252,43 @@ func TestResolveArgs_InvalidResultReferenceFormat_ReturnsError(t *testing.T) {
 	}
 }
 
+func TestResolveArgs_NullResolvedValue_OmitsProperty(t *testing.T) {
+	// Per RFC 8620, if a back-reference path resolves to null,
+	// the property should be omitted (not included with nil value)
+	args := map[string]any{
+		"accountId": "user-123",
+		"#updatedProperties": map[string]any{
+			"resultOf": "set0",
+			"name":     "Email/set",
+			"path":     "/updatedProperties",
+		},
+	}
+	responses := []MethodResponse{
+		{
+			ClientID: "set0",
+			Name:     "Email/set",
+			Args: map[string]any{
+				"updatedProperties": nil, // explicitly null
+			},
+		},
+	}
+
+	result, err := ResolveArgs(args, responses)
+	if err != nil {
+		t.Fatalf("ResolveArgs returned error: %v", err)
+	}
+
+	// The key should NOT be present since the resolved value is null
+	if _, exists := result["updatedProperties"]; exists {
+		t.Error("expected 'updatedProperties' to be omitted when resolved value is null")
+	}
+
+	// accountId should still be present
+	if result["accountId"] != "user-123" {
+		t.Errorf("expected accountId 'user-123', got %v", result["accountId"])
+	}
+}
+
 func TestResolveArgs_ReferenceLaterResponse_UsesOnlyPreviousResponses(t *testing.T) {
 	// This tests that we only look at responses BEFORE the current call
 	args := map[string]any{

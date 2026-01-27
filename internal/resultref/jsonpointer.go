@@ -35,12 +35,60 @@ func EvaluatePath(data any, path string) (any, error) {
 		return nil, fmt.Errorf("path not found: %s", path)
 	}
 
-	// The jsonpointer library returns (nil, nil) for nonexistent paths
+	// The jsonpointer library returns (nil, nil) for both "key missing" and
+	// "key exists with null value". Distinguish by checking the parent object.
 	if result == nil {
+		if keyExists(data, path) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("path not found: %s", path)
 	}
 
 	return result, nil
+}
+
+// keyExists checks whether the final segment of a JSON Pointer path exists in the data,
+// to distinguish between a null value and a missing key.
+func keyExists(data any, path string) bool {
+	// Parse path into segments: "/a/b/c" -> ["a", "b", "c"]
+	segments := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(segments) == 0 {
+		return false
+	}
+
+	// Navigate to the parent (all segments except the last)
+	parent := data
+	for _, seg := range segments[:len(segments)-1] {
+		switch p := parent.(type) {
+		case map[string]any:
+			var ok bool
+			parent, ok = p[seg]
+			if !ok {
+				return false
+			}
+		case []any:
+			idx, err := strconv.Atoi(seg)
+			if err != nil || idx < 0 || idx >= len(p) {
+				return false
+			}
+			parent = p[idx]
+		default:
+			return false
+		}
+	}
+
+	// Check if the final segment exists in the parent
+	finalSeg := segments[len(segments)-1]
+	switch p := parent.(type) {
+	case map[string]any:
+		_, exists := p[finalSeg]
+		return exists
+	case []any:
+		idx, err := strconv.Atoi(finalSeg)
+		return err == nil && idx >= 0 && idx < len(p)
+	default:
+		return false
+	}
 }
 
 // evaluateWildcardPath handles paths containing the JMAP wildcard (*) extension
