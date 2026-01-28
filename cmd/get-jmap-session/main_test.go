@@ -343,7 +343,7 @@ func TestBuildSession_WithInjectedConfig(t *testing.T) {
 		t.Errorf("expected uploadUrl '%s', got '%s'", expectedUploadUrl, session.UploadUrl)
 	}
 
-	expectedEventSourceUrl := "https://test.example.com/v1/events/{types}/{closeafter}/{ping}"
+	expectedEventSourceUrl := "https://test.example.com/v1/not-implemented/events/{types}/{closeafter}/{ping}"
 	if session.EventSourceUrl != expectedEventSourceUrl {
 		t.Errorf("expected eventSourceUrl '%s', got '%s'", expectedEventSourceUrl, session.EventSourceUrl)
 	}
