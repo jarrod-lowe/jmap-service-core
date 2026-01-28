@@ -15,7 +15,7 @@ Scope deliberately excludes:
 * mailbox CRUD
 * full-text search / advanced filters
 * push notifications
-* blob download URLs for third-party clients (upload IS implemented)
+* blob download URLs for third-party clients (upload IS implemented, IAM blob delete IS implemented)
 
 The intended first client is *your own* (so we can start with a very small JMAP Mail surface).
 
@@ -369,3 +369,13 @@ This MVP is intentionally minimal, but it’s set up so later you can add:
 * push event source URL
 
 None of those require changing the fundamental endpoints.
+
+## Blob Deletion
+
+Blobs can be deleted via the IAM-only `DELETE /delete-iam/{accountId}/{blobId}` endpoint. The deletion uses a mark-then-async-delete pattern:
+
+1. **Mark**: The delete handler sets a `deletedAt` (ISO 8601) attribute on the blob's DynamoDB record and returns 204
+2. **Async cleanup**: A DynamoDB Streams-triggered Lambda detects the `deletedAt` addition, deletes the S3 object, then deletes the DynamoDB record
+3. **Download guard**: The download handler checks `deletedAt` and returns 404 for marked-deleted blobs
+
+This approach ensures the API responds quickly while cleanup happens reliably via stream processing with automatic retries.

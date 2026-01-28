@@ -472,6 +472,15 @@ This is the test email body content for JMAP import verification.
     else:
         results.record_fail("Email preview matches", "No preview field")
 
+    # Cleanup: destroy the test email
+    if email_id:
+        from test_email_set import destroy_emails_and_verify_s3_cleanup
+
+        destroy_emails_and_verify_s3_cleanup(
+            session.api_url, config.token, account_id, [email_id], config, results,
+            test_name_prefix="[import/get cleanup]",
+        )
+
 
 def setup_query_test_data(client: Client, config, results) -> dict | None:
     """

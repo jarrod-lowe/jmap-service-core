@@ -26,6 +26,7 @@ from test_changes import test_email_changes, test_mailbox_changes, test_thread_c
 from test_email import setup_query_test_data, test_email_import_and_get
 from test_email_headers import test_header_properties
 from test_email_set import (
+    destroy_emails_and_verify_cleanup,
     test_email_set_mailbox_changes,
     test_email_set_counter_updates,
     test_email_set_state_tracking,
@@ -358,7 +359,7 @@ def test_blob_upload(client: Client, token: str, results: TestResult):
         )
 
 
-def test_blob_download(client: Client, token: str, results: TestResult):
+def test_blob_download(client: Client, token: str, results: TestResult) -> str | None:
     """
     Test 5: Blob Download (CloudFront Signed URL Redirect)
 
@@ -376,7 +377,7 @@ def test_blob_download(client: Client, token: str, results: TestResult):
     # Test: Session has download_url (RFC 8620 Section 2 requirement)
     if not session.download_url:
         results.record_fail("Session has download_url", "download_url not in session")
-        return
+        return None
 
     results.record_pass("Session has download_url", session.download_url)
 
@@ -385,7 +386,7 @@ def test_blob_download(client: Client, token: str, results: TestResult):
         account_id = client.account_id
     except Exception as e:
         results.record_fail("Blob download request", f"No account ID: {e}")
-        return
+        return None
 
     # First, upload a test blob
     upload_endpoint = session.upload_url.replace("{accountId}", account_id)
@@ -404,16 +405,16 @@ def test_blob_download(client: Client, token: str, results: TestResult):
                 "Upload blob for download test",
                 f"Got HTTP {upload_response.status_code}: {upload_response.text}",
             )
-            return
+            return None
         upload_data = upload_response.json()
         blob_id = upload_data.get("blobId")
         if not blob_id:
             results.record_fail("Upload blob for download test", "No blobId in response")
-            return
+            return None
         results.record_pass("Upload blob for download test", f"blobId: {blob_id}")
     except Exception as e:
         results.record_fail("Upload blob for download test", str(e))
-        return
+        return None
 
     # Build download URL from session.download_url template
     download_url = session.download_url.replace("{accountId}", account_id).replace(
@@ -431,7 +432,7 @@ def test_blob_download(client: Client, token: str, results: TestResult):
         )
     except Exception as e:
         results.record_fail("Blob download request", str(e))
-        return
+        return None
 
     # Test: Returns 302 redirect
     if download_response.status_code == 302:
@@ -441,7 +442,7 @@ def test_blob_download(client: Client, token: str, results: TestResult):
             "Blob download returns 302 redirect",
             f"Got HTTP {download_response.status_code}: {download_response.text}",
         )
-        return
+        return None
 
     # Test: Has Location header
     location = download_response.headers.get("Location")
@@ -449,7 +450,7 @@ def test_blob_download(client: Client, token: str, results: TestResult):
         results.record_pass("Blob download has Location header", location[:100] + "...")
     else:
         results.record_fail("Blob download has Location header", "No Location header")
-        return
+        return None
 
     # Test: Location is a CloudFront signed URL
     if "Signature=" in location or "Key-Pair-Id=" in location:
@@ -480,8 +481,9 @@ def test_blob_download(client: Client, token: str, results: TestResult):
     except Exception as e:
         results.record_fail("Follow redirect to CloudFront", str(e))
 
+    return blob_id
 
-def test_blob_download_byte_range(client: Client, token: str, results: TestResult):
+def test_blob_download_byte_range(client: Client, token: str, results: TestResult) -> str | None:
     """
     Test 6: Blob Download Byte Range (composite blobId)
 
@@ -498,14 +500,14 @@ def test_blob_download_byte_range(client: Client, token: str, results: TestResul
 
     if not session.download_url:
         results.record_fail("Session has download_url", "download_url not in session")
-        return
+        return None
 
     # Get account ID
     try:
         account_id = client.account_id
     except Exception as e:
         results.record_fail("Blob byte range test", f"No account ID: {e}")
-        return
+        return None
 
     # Upload a test blob with predictable content
     upload_endpoint = session.upload_url.replace("{accountId}", account_id)
@@ -526,16 +528,16 @@ def test_blob_download_byte_range(client: Client, token: str, results: TestResul
                 "Upload blob for byte range test",
                 f"Got HTTP {upload_response.status_code}: {upload_response.text}",
             )
-            return
+            return None
         upload_data = upload_response.json()
         blob_id = upload_data.get("blobId")
         if not blob_id:
             results.record_fail("Upload blob for byte range test", "No blobId in response")
-            return
+            return None
         results.record_pass("Upload blob for byte range test", f"blobId: {blob_id}, size: {len(test_content)}")
     except Exception as e:
         results.record_fail("Upload blob for byte range test", str(e))
-        return
+        return None
 
     # Build download URL with composite blobId: blobId,startByte,endByte
     # Request bytes 10-29 (20 bytes: "0123456789" twice)
@@ -556,7 +558,7 @@ def test_blob_download_byte_range(client: Client, token: str, results: TestResul
         )
     except Exception as e:
         results.record_fail("Byte range download request", str(e))
-        return
+        return None
 
     # Test: Returns 302 redirect
     if download_response.status_code == 302:
@@ -566,13 +568,13 @@ def test_blob_download_byte_range(client: Client, token: str, results: TestResul
             "Byte range download returns 302 redirect",
             f"Got HTTP {download_response.status_code}: {download_response.text}",
         )
-        return
+        return None
 
     # Test: Location header contains composite blobId
     location = download_response.headers.get("Location")
     if not location:
         results.record_fail("Byte range download has Location header", "No Location header")
-        return
+        return None
 
     if composite_blob_id in location or f"{start_byte},{end_byte}" in location:
         results.record_pass("Location contains byte range", location[:100] + "...")
@@ -600,7 +602,7 @@ def test_blob_download_byte_range(client: Client, token: str, results: TestResul
                 "CloudFront returns 206 Partial Content",
                 f"Got HTTP {content_response.status_code}: {content_response.text[:200]}",
             )
-            return
+            return None
 
         # Test: Content is the expected byte range
         expected_content = test_content[start_byte : end_byte + 1]  # Range is inclusive
@@ -624,8 +626,9 @@ def test_blob_download_byte_range(client: Client, token: str, results: TestResul
     except Exception as e:
         results.record_fail("Follow redirect for byte range", str(e))
 
+    return blob_id
 
-def test_blob_download_cross_account(client: Client, token: str, results: TestResult):
+def test_blob_download_cross_account(client: Client, token: str, results: TestResult) -> str | None:
     """
     Test 7: Blob Download Cross-Account Access (should be forbidden)
 
@@ -641,14 +644,14 @@ def test_blob_download_cross_account(client: Client, token: str, results: TestRe
         results.record_pass(
             "Skip cross-account test", "download_url not available"
         )
-        return
+        return None
 
     # Get actual account ID
     try:
         account_id = client.account_id
     except Exception as e:
         results.record_fail("Cross-account test", f"No account ID: {e}")
-        return
+        return None
 
     # First, upload a test blob to get a valid blobId
     upload_endpoint = session.upload_url.replace("{accountId}", account_id)
@@ -667,15 +670,15 @@ def test_blob_download_cross_account(client: Client, token: str, results: TestRe
                 "Upload blob for cross-account test",
                 f"Got HTTP {upload_response.status_code}",
             )
-            return
+            return None
         upload_data = upload_response.json()
         blob_id = upload_data.get("blobId")
         if not blob_id:
             results.record_fail("Upload blob for cross-account test", "No blobId")
-            return
+            return None
     except Exception as e:
         results.record_fail("Upload blob for cross-account test", str(e))
-        return
+        return None
 
     # Try to download with a different accountId in the path
     fake_account_id = "fake-account-id-12345"
@@ -692,7 +695,7 @@ def test_blob_download_cross_account(client: Client, token: str, results: TestRe
         )
     except Exception as e:
         results.record_fail("Cross-account download request", str(e))
-        return
+        return None
 
     # Test: Returns 403 Forbidden (account ID mismatch)
     if response.status_code == 403:
@@ -706,6 +709,7 @@ def test_blob_download_cross_account(client: Client, token: str, results: TestRe
             f"Got HTTP {response.status_code}: {response.text}",
         )
 
+    return blob_id
 
 def get_s3_tags(bucket: str, account_id: str, blob_id: str, region: str) -> dict[str, str]:
     """Get S3 object tags for a blob."""
@@ -723,7 +727,7 @@ def get_dynamodb_blob(table: str, account_id: str, blob_id: str, region: str) ->
     return response.get("Item")
 
 
-def test_blob_upload_with_x_parent(client: Client, config: Config, results: TestResult):
+def test_blob_upload_with_x_parent(client: Client, config: Config, results: TestResult) -> str | None:
     """
     Test 8: Blob Upload with Valid X-Parent Header
 
@@ -740,13 +744,13 @@ def test_blob_upload_with_x_parent(client: Client, config: Config, results: Test
 
     if not session.upload_url:
         results.record_fail("Session has upload_url", "upload_url not in session")
-        return
+        return None
 
     try:
         account_id = client.account_id
     except Exception as e:
         results.record_fail("X-Parent upload request", f"No account ID: {e}")
-        return
+        return None
 
     upload_endpoint = session.upload_url.replace("{accountId}", account_id)
     test_content = b"Test blob content with X-Parent header for RFC 8620 compliance"
@@ -763,7 +767,7 @@ def test_blob_upload_with_x_parent(client: Client, config: Config, results: Test
         )
     except requests.RequestException as e:
         results.record_fail("X-Parent blob upload request", str(e))
-        return
+        return None
 
     # Test: HTTP 201 response
     if response.status_code == 201:
@@ -772,19 +776,19 @@ def test_blob_upload_with_x_parent(client: Client, config: Config, results: Test
         results.record_fail(
             "X-Parent blob upload returns 201", f"Got HTTP {response.status_code}: {response.text}"
         )
-        return
+        return None
 
     # Parse JSON response
     try:
         response_data = response.json()
     except Exception as e:
         results.record_fail("X-Parent blob upload returns valid JSON", str(e))
-        return
+        return None
 
     blob_id = response_data.get("blobId")
     if not blob_id:
         results.record_fail("X-Parent blob upload has blobId", "No blobId in response")
-        return
+        return None
 
     results.record_pass("X-Parent blob upload has blobId", blob_id)
 
@@ -822,6 +826,7 @@ def test_blob_upload_with_x_parent(client: Client, config: Config, results: Test
         except Exception as e:
             results.record_fail("DynamoDB parent field verification", str(e))
 
+    return blob_id
 
 def test_blob_upload_invalid_x_parent(client: Client, config: Config, results: TestResult):
     """
@@ -956,7 +961,7 @@ def test_blob_upload_x_parent_too_long(client: Client, config: Config, results: 
         results.record_fail("Parse error response", str(e))
 
 
-def test_blob_upload_without_x_parent(client: Client, config: Config, results: TestResult):
+def test_blob_upload_without_x_parent(client: Client, config: Config, results: TestResult) -> str | None:
     """
     Test 11: Blob Upload without X-Parent Header
 
@@ -973,13 +978,13 @@ def test_blob_upload_without_x_parent(client: Client, config: Config, results: T
 
     if not session.upload_url:
         results.record_fail("Session has upload_url", "upload_url not in session")
-        return
+        return None
 
     try:
         account_id = client.account_id
     except Exception as e:
         results.record_fail("No X-Parent upload request", f"No account ID: {e}")
-        return
+        return None
 
     upload_endpoint = session.upload_url.replace("{accountId}", account_id)
     test_content = b"Test blob content WITHOUT X-Parent header for storage verification"
@@ -995,7 +1000,7 @@ def test_blob_upload_without_x_parent(client: Client, config: Config, results: T
         )
     except requests.RequestException as e:
         results.record_fail("No X-Parent blob upload request", str(e))
-        return
+        return None
 
     # Test: HTTP 201 response
     if response.status_code == 201:
@@ -1004,19 +1009,19 @@ def test_blob_upload_without_x_parent(client: Client, config: Config, results: T
         results.record_fail(
             "No X-Parent blob upload returns 201", f"Got HTTP {response.status_code}: {response.text}"
         )
-        return
+        return None
 
     # Parse JSON response
     try:
         response_data = response.json()
     except Exception as e:
         results.record_fail("No X-Parent blob upload returns valid JSON", str(e))
-        return
+        return None
 
     blob_id = response_data.get("blobId")
     if not blob_id:
         results.record_fail("No X-Parent blob upload has blobId", "No blobId in response")
-        return
+        return None
 
     results.record_pass("No X-Parent blob upload has blobId", blob_id)
 
@@ -1054,6 +1059,7 @@ def test_blob_upload_without_x_parent(client: Client, config: Config, results: T
         except Exception as e:
             results.record_fail("DynamoDB no parent field verification", str(e))
 
+    return blob_id
 
 def test_email_query_response_structure(
     client: Client, test_data: dict, results: TestResult
@@ -1486,6 +1492,102 @@ def print_summary(results: TestResult):
         print(f"{Colors.RED}SOME TESTS FAILED{Colors.NC}")
 
 
+def delete_blob(client: Client, token: str, account_id: str, blob_id: str) -> requests.Response:
+    """Send DELETE /delete/{accountId}/{blobId} with bearer token.
+
+    Derives the delete URL from the session's download_url to include the
+    correct API Gateway stage prefix (e.g. /v1).
+    """
+    download_url = client.jmap_session.download_url
+    delete_url_template = download_url.replace("/download/", "/delete/")
+    url = delete_url_template.replace("{accountId}", account_id).replace("{blobId}", blob_id)
+    return requests.delete(
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30,
+    )
+
+
+def cleanup_uploaded_blobs(
+    client: Client, token: str, account_id: str, blob_ids: list[str],
+    config: Config, results: TestResult,
+):
+    """Delete all uploaded blobs via the Cognito delete endpoint, then verify async cleanup removes S3 objects and DynamoDB records."""
+    import time
+
+    print()
+    print("Testing Blob Delete (Cognito Auth) + Cleanup...")
+
+    successfully_deleted = []
+    for blob_id in blob_ids:
+        try:
+            response = delete_blob(client, token, account_id, blob_id)
+            if response.status_code == 204:
+                results.record_pass(f"Blob delete {blob_id}", "204 No Content")
+                successfully_deleted.append(blob_id)
+            else:
+                results.record_fail(
+                    f"Blob delete {blob_id}",
+                    f"Got HTTP {response.status_code}: {response.text}",
+                )
+        except Exception as e:
+            results.record_fail(f"Blob delete {blob_id}", str(e))
+
+    # Verify async cleanup (DynamoDB Streams → blob-cleanup lambda)
+    if not successfully_deleted:
+        return
+
+    can_check_s3 = hasattr(config, 'blob_bucket') and config.blob_bucket
+    can_check_ddb = hasattr(config, 'dynamodb_table') and config.dynamodb_table
+
+    if not can_check_s3 and not can_check_ddb:
+        return
+
+    import boto3
+
+    s3_client = boto3.client("s3", region_name=config.region) if can_check_s3 else None
+
+    max_wait = 30
+    poll_interval = 2
+    elapsed = 0
+
+    # Track which blobs still need verification
+    pending_s3 = set(successfully_deleted) if can_check_s3 else set()
+    pending_ddb = set(successfully_deleted) if can_check_ddb else set()
+
+    while (pending_s3 or pending_ddb) and elapsed < max_wait:
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+
+        for blob_id in list(pending_s3):
+            key = f"{account_id}/{blob_id}"
+            try:
+                s3_client.head_object(Bucket=config.blob_bucket, Key=key)
+                # Still exists, keep polling
+            except s3_client.exceptions.ClientError as e:
+                if e.response["Error"]["Code"] == "404":
+                    pending_s3.discard(blob_id)
+
+        for blob_id in list(pending_ddb):
+            item = get_dynamodb_blob(config.dynamodb_table, account_id, blob_id, config.region)
+            if item is None:
+                pending_ddb.discard(blob_id)
+
+    # Record results
+    for blob_id in successfully_deleted:
+        if can_check_s3:
+            if blob_id not in pending_s3:
+                results.record_pass(f"Blob cleanup S3 {blob_id}", "S3 object removed")
+            else:
+                results.record_fail(f"Blob cleanup S3 {blob_id}", f"S3 object still exists after {max_wait}s")
+
+        if can_check_ddb:
+            if blob_id not in pending_ddb:
+                results.record_pass(f"Blob cleanup DynamoDB {blob_id}", "DynamoDB record removed")
+            else:
+                results.record_fail(f"Blob cleanup DynamoDB {blob_id}", f"DynamoDB record still exists after {max_wait}s")
+
+
 def main():
     """Run all JMAP protocol compliance tests."""
     print("=" * 40)
@@ -1505,20 +1607,33 @@ def main():
         # Test 3: Email/query
         test_email_query(client, results)
 
+        # Collect blob IDs for cleanup
+        uploaded_blob_ids: list[str] = []
+
         # Test 4: Blob Upload
-        test_blob_upload(client, config.token, results)
+        blob_id = test_blob_upload(client, config.token, results)
+        if blob_id:
+            uploaded_blob_ids.append(blob_id)
 
         # Test 5: Blob Download
-        test_blob_download(client, config.token, results)
+        blob_id = test_blob_download(client, config.token, results)
+        if blob_id:
+            uploaded_blob_ids.append(blob_id)
 
         # Test 6: Blob Download Byte Range
-        test_blob_download_byte_range(client, config.token, results)
+        blob_id = test_blob_download_byte_range(client, config.token, results)
+        if blob_id:
+            uploaded_blob_ids.append(blob_id)
 
         # Test 7: Blob Download Cross-Account Access
-        test_blob_download_cross_account(client, config.token, results)
+        blob_id = test_blob_download_cross_account(client, config.token, results)
+        if blob_id:
+            uploaded_blob_ids.append(blob_id)
 
         # Test 8: Blob Upload with X-Parent Header
-        test_blob_upload_with_x_parent(client, config, results)
+        blob_id = test_blob_upload_with_x_parent(client, config, results)
+        if blob_id:
+            uploaded_blob_ids.append(blob_id)
 
         # Test 9: Blob Upload with Invalid X-Parent Header
         test_blob_upload_invalid_x_parent(client, config, results)
@@ -1527,7 +1642,16 @@ def main():
         test_blob_upload_x_parent_too_long(client, config, results)
 
         # Test 11: Blob Upload without X-Parent (verify no Parent in storage)
-        test_blob_upload_without_x_parent(client, config, results)
+        blob_id = test_blob_upload_without_x_parent(client, config, results)
+        if blob_id:
+            uploaded_blob_ids.append(blob_id)
+
+        # Blob Delete + Cleanup (tests Cognito delete endpoint)
+        if uploaded_blob_ids:
+            account_id = client.account_id
+            cleanup_uploaded_blobs(
+                client, config.token, account_id, uploaded_blob_ids, config, results
+            )
 
         # Test 12: Email/import and Email/get round-trip
         test_email_import_and_get(client, config, results)
@@ -1556,6 +1680,17 @@ def main():
 
             # Test 19: Stable sort order
             test_email_query_stable_sort(client, query_test_data, results)
+
+            # Cleanup query test data emails
+            query_email_ids = query_test_data.get("email_ids", [])
+            if query_email_ids:
+                account_id = query_test_data["account_id"]
+                api_url = client.jmap_session.api_url
+                destroy_emails_and_verify_cleanup(
+                    api_url, config.token, account_id, query_email_ids,
+                    config, results,
+                    test_name_prefix="[query test data cleanup]",
+                )
 
         # Thread/get E2E Tests (RFC 8621 §3)
         test_thread_operations(client, config, results)

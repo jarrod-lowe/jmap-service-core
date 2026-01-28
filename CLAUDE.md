@@ -15,6 +15,14 @@ Use the brainstorming superpower when doing design of new features.
 
 Do not write code to work around things that should be errors. For example: we define things like the environment variables on a lambda - so we shouldn't accept a variable not being set and just not do things.
 
+## Separation of Responsibility
+
+This repo - jmap-service-core - is responsible for handling the JMAP protocol
+itself, and blob handling. It implements no methods for any type of resource
+handling - those belong in plugins. The jmap-service-email plugin (usually in
+/home/jarrod/git/jmap-service-email) handles Email, Mailboxes and Threads, for
+example.
+
 ## Reference Documents
 
 The `docs/` directory contains the official JMAP RFCs for reference:
@@ -43,11 +51,21 @@ This outputs a Cognito JWT token for the test user, which can be used with JMAP 
 - `GET /.well-known/jmap` → Session discovery (Cognito auth) → `GetJmapSessionFunction`
 - `POST /jmap` → User JMAP API (Cognito auth) → `JmapApiFunction`
 - `POST /jmap-iam/{accountId}` → Machine ingestion (IAM auth) → `JmapApiFunction`
+- `POST /upload/{accountId}` → Blob upload (Cognito auth) → `BlobUploadFunction`
+- `POST /upload-iam/{accountId}` → Blob upload (IAM auth) → `BlobUploadFunction`
+- `GET /download/{accountId}/{blobId}` → Blob download (Cognito auth) → `BlobDownloadFunction`
+- `GET /download-iam/{accountId}/{blobId}` → Blob download (IAM auth) → `BlobDownloadFunction`
+- `DELETE /delete/{accountId}/{blobId}` → Blob delete (Cognito auth) → `BlobDeleteFunction`
+- `DELETE /delete-iam/{accountId}/{blobId}` → Blob delete (IAM auth) → `BlobDeleteFunction`
 
 **Lambda Functions** (Go, ARM64):
 
 1. **GetJmapSessionFunction**: Returns JMAP session object with account info and capabilities
 2. **JmapApiFunction**: Unified handler for both user and machine JMAP requests, dispatches to method implementations
+3. **BlobUploadFunction**: Handles blob uploads, stores in S3 with DynamoDB metadata
+4. **BlobDownloadFunction**: Generates CloudFront signed URLs for blob downloads
+5. **BlobDeleteFunction**: Marks blobs as deleted (sets `deletedAt` on DynamoDB record), returns 204
+6. **BlobCleanupFunction**: DynamoDB Streams trigger that asynchronously deletes the S3 object and DynamoDB record after a blob is marked deleted
 
 **Data Storage**:
 

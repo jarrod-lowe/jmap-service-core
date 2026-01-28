@@ -244,28 +244,39 @@ def test_thread_operations(client, config, results):
 
     results.record_pass("Thread tests mailbox created", f"mailboxId: {mailbox_id}")
 
+    all_email_ids = []
+
     # Test 1: Standalone email gets its own thread
-    test_standalone_email_thread(
+    all_email_ids.extend(test_standalone_email_thread(
         api_url, upload_url, config.token, account_id, mailbox_id, results
-    )
+    ))
 
     # Test 2: Reply joins existing thread
-    test_reply_joins_thread(
+    all_email_ids.extend(test_reply_joins_thread(
         api_url, upload_url, config.token, account_id, mailbox_id, results
-    )
+    ))
 
     # Test 3: Reply to non-existent message gets own thread
-    test_reply_to_nonexistent(
+    all_email_ids.extend(test_reply_to_nonexistent(
         api_url, upload_url, config.token, account_id, mailbox_id, results
-    )
+    ))
 
     # Test 4: Multiple replies form a chain
-    test_thread_chain(
+    all_email_ids.extend(test_thread_chain(
         api_url, upload_url, config.token, account_id, mailbox_id, results
-    )
+    ))
 
     # Test 5: Thread/get with unknown ID returns notFound
     test_thread_not_found(api_url, config.token, account_id, results)
+
+    # Cleanup
+    if all_email_ids:
+        from test_email_set import destroy_emails_and_verify_s3_cleanup
+
+        destroy_emails_and_verify_s3_cleanup(
+            api_url, config.token, account_id, all_email_ids, config, results,
+            test_name_prefix="[thread tests cleanup]",
+        )
 
 
 def test_standalone_email_thread(
@@ -275,8 +286,9 @@ def test_standalone_email_thread(
     account_id: str,
     mailbox_id: str,
     results,
-):
+) -> list[str]:
     """Test 1: Standalone email (no In-Reply-To) gets its own thread."""
+    email_ids_created = []
     print()
     print("Test 1: Standalone email gets its own thread...")
 
@@ -297,7 +309,8 @@ def test_standalone_email_thread(
 
     if not email_id or not thread_id:
         results.record_fail("Standalone email has own thread", "Failed to import email")
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     results.record_pass(
         "Standalone email imported",
@@ -311,7 +324,7 @@ def test_standalone_email_thread(
         results.record_fail(
             "Standalone email has own thread", f"Thread/get error: {thread_response['error']}"
         )
-        return
+        return email_ids_created
 
     thread_list = thread_response.get("list", [])
     if len(thread_list) != 1:
@@ -319,7 +332,7 @@ def test_standalone_email_thread(
             "Standalone email has own thread",
             f"Expected 1 thread, got {len(thread_list)}",
         )
-        return
+        return email_ids_created
 
     thread = thread_list[0]
     email_ids = thread.get("emailIds", [])
@@ -335,6 +348,8 @@ def test_standalone_email_thread(
             f"Expected [{email_id}], got {email_ids}",
         )
 
+    return email_ids_created
+
 
 def test_reply_joins_thread(
     api_url: str,
@@ -343,8 +358,9 @@ def test_reply_joins_thread(
     account_id: str,
     mailbox_id: str,
     results,
-):
+) -> list[str]:
     """Test 2: Reply (In-Reply-To matches Message-ID) joins existing thread."""
+    email_ids_created = []
     print()
     print("Test 2: Reply joins existing thread...")
 
@@ -367,7 +383,8 @@ def test_reply_joins_thread(
 
     if not email_id_a or not thread_id_a:
         results.record_fail("Reply joins existing thread", "Failed to import parent email")
-        return
+        return email_ids_created
+    email_ids_created.append(email_id_a)
 
     # Import email B (reply, In-Reply-To points to A)
     email_id_b, thread_id_b = import_email_with_headers(
@@ -384,7 +401,8 @@ def test_reply_joins_thread(
 
     if not email_id_b or not thread_id_b:
         results.record_fail("Reply joins existing thread", "Failed to import reply email")
-        return
+        return email_ids_created
+    email_ids_created.append(email_id_b)
 
     # Both should have the same threadId
     if thread_id_a != thread_id_b:
@@ -392,7 +410,7 @@ def test_reply_joins_thread(
             "Reply joins existing thread",
             f"Thread IDs differ: parent={thread_id_a}, reply={thread_id_b}",
         )
-        return
+        return email_ids_created
 
     results.record_pass(
         "Reply has same threadId as parent",
@@ -407,7 +425,7 @@ def test_reply_joins_thread(
             "Reply joins existing thread",
             f"Thread/get error: {thread_response['error']}",
         )
-        return
+        return email_ids_created
 
     thread_list = thread_response.get("list", [])
     if len(thread_list) != 1:
@@ -415,7 +433,7 @@ def test_reply_joins_thread(
             "Reply joins existing thread",
             f"Expected 1 thread, got {len(thread_list)}",
         )
-        return
+        return email_ids_created
 
     thread = thread_list[0]
     email_ids = thread.get("emailIds", [])
@@ -433,6 +451,8 @@ def test_reply_joins_thread(
             f"Expected {expected}, got {email_ids}",
         )
 
+    return email_ids_created
+
 
 def test_reply_to_nonexistent(
     api_url: str,
@@ -441,8 +461,9 @@ def test_reply_to_nonexistent(
     account_id: str,
     mailbox_id: str,
     results,
-):
+) -> list[str]:
     """Test 3: Reply to non-existent Message-ID gets its own thread."""
+    email_ids_created = []
     print()
     print("Test 3: Reply to non-existent message gets own thread...")
 
@@ -466,7 +487,8 @@ def test_reply_to_nonexistent(
         results.record_fail(
             "Reply to non-existent gets own thread", "Failed to import email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     results.record_pass(
         "Reply to non-existent imported",
@@ -481,7 +503,7 @@ def test_reply_to_nonexistent(
             "Reply to non-existent gets own thread",
             f"Thread/get error: {thread_response['error']}",
         )
-        return
+        return email_ids_created
 
     thread_list = thread_response.get("list", [])
     if len(thread_list) != 1:
@@ -489,7 +511,7 @@ def test_reply_to_nonexistent(
             "Reply to non-existent gets own thread",
             f"Expected 1 thread, got {len(thread_list)}",
         )
-        return
+        return email_ids_created
 
     thread = thread_list[0]
     email_ids = thread.get("emailIds", [])
@@ -505,6 +527,8 @@ def test_reply_to_nonexistent(
             f"Expected [{email_id}], got {email_ids}",
         )
 
+    return email_ids_created
+
 
 def test_thread_chain(
     api_url: str,
@@ -513,8 +537,9 @@ def test_thread_chain(
     account_id: str,
     mailbox_id: str,
     results,
-):
+) -> list[str]:
     """Test 4: Multiple replies form a chain (A -> B -> C all in same thread)."""
+    email_ids_created = []
     print()
     print("Test 4: Thread chain with 3 emails...")
 
@@ -539,7 +564,8 @@ def test_thread_chain(
 
     if not email_id_a or not thread_id_a:
         results.record_fail("Thread chain has 3 emails", "Failed to import email A")
-        return
+        return email_ids_created
+    email_ids_created.append(email_id_a)
 
     # Import B (reply to A)
     email_id_b, thread_id_b = import_email_with_headers(
@@ -556,7 +582,8 @@ def test_thread_chain(
 
     if not email_id_b or not thread_id_b:
         results.record_fail("Thread chain has 3 emails", "Failed to import email B")
-        return
+        return email_ids_created
+    email_ids_created.append(email_id_b)
 
     # Import C (reply to B)
     email_id_c, thread_id_c = import_email_with_headers(
@@ -573,7 +600,8 @@ def test_thread_chain(
 
     if not email_id_c or not thread_id_c:
         results.record_fail("Thread chain has 3 emails", "Failed to import email C")
-        return
+        return email_ids_created
+    email_ids_created.append(email_id_c)
 
     # All three should have the same threadId
     if thread_id_a != thread_id_b or thread_id_b != thread_id_c:
@@ -581,7 +609,7 @@ def test_thread_chain(
             "Thread chain has 3 emails",
             f"Thread IDs differ: A={thread_id_a}, B={thread_id_b}, C={thread_id_c}",
         )
-        return
+        return email_ids_created
 
     results.record_pass(
         "All chain emails have same threadId",
@@ -596,7 +624,7 @@ def test_thread_chain(
             "Thread chain has 3 emails in order",
             f"Thread/get error: {thread_response['error']}",
         )
-        return
+        return email_ids_created
 
     thread_list = thread_response.get("list", [])
     if len(thread_list) != 1:
@@ -604,7 +632,7 @@ def test_thread_chain(
             "Thread chain has 3 emails in order",
             f"Expected 1 thread, got {len(thread_list)}",
         )
-        return
+        return email_ids_created
 
     thread = thread_list[0]
     email_ids = thread.get("emailIds", [])
@@ -620,6 +648,8 @@ def test_thread_chain(
             "Thread chain has 3 emails in order",
             f"Expected {expected}, got {email_ids}",
         )
+
+    return email_ids_created
 
 
 def test_thread_not_found(api_url: str, token: str, account_id: str, results):

@@ -838,3 +838,12 @@ def test_header_properties(client: Client, config, results):
     test_case_insensitive_matching(session.api_url, config.token, account_id, email_id, results)
     test_missing_header(session.api_url, config.token, account_id, email_id, results)
     test_invalid_form_rejection(session.api_url, config.token, account_id, email_id, results)
+
+    # Cleanup: destroy the test email
+    if email_id:
+        from test_email_set import destroy_emails_and_verify_s3_cleanup
+
+        destroy_emails_and_verify_s3_cleanup(
+            session.api_url, config.token, account_id, [email_id], config, results,
+            test_name_prefix="[header tests cleanup]",
+        )

@@ -486,12 +486,13 @@ def test_email_changes_response_structure(
 
 def test_email_state_changes_after_import(
     api_url: str, upload_url: str, token: str, account_id: str, mailbox_id: str, results
-):
+) -> list[str]:
     """
     Test 2: State Changes After Email/import (RFC 8620 §5.1)
 
     Validates that state changes after importing a new email.
     """
+    email_ids_created = []
     print()
     print("Test: Email state changes after import (RFC 8620 §5.1)...")
 
@@ -501,7 +502,7 @@ def test_email_state_changes_after_import(
         results.record_fail(
             "Email state changes after import", "Failed to get initial state"
         )
-        return
+        return email_ids_created
 
     # Import a new email
     email_id = import_test_email(api_url, upload_url, token, account_id, mailbox_id)
@@ -509,7 +510,8 @@ def test_email_state_changes_after_import(
         results.record_fail(
             "Email state changes after import", "Failed to import test email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # Get new state
     new_state = get_email_state(api_url, token, account_id)
@@ -517,7 +519,7 @@ def test_email_state_changes_after_import(
         results.record_fail(
             "Email state changes after import", "Failed to get new state"
         )
-        return
+        return email_ids_created
 
     # Validate: newState != oldState
     if new_state != initial_state:
@@ -531,15 +533,17 @@ def test_email_state_changes_after_import(
             f"State did not change after import (still {initial_state[:16]}...)",
         )
 
+    return email_ids_created
 
 def test_email_changes_returns_created(
     api_url: str, upload_url: str, token: str, account_id: str, mailbox_id: str, results
-):
+) -> list[str]:
     """
     Test 3: Email/changes Returns Created Email (RFC 8620 §5.2)
 
     Validates that a newly imported email appears in the created array.
     """
+    email_ids_created = []
     print()
     print("Test: Email/changes returns created email (RFC 8620 §5.2)...")
 
@@ -549,7 +553,7 @@ def test_email_changes_returns_created(
         results.record_fail(
             "Email/changes returns created", "Failed to get initial state"
         )
-        return
+        return email_ids_created
 
     # Import a new email
     email_id = import_test_email(api_url, upload_url, token, account_id, mailbox_id)
@@ -557,7 +561,8 @@ def test_email_changes_returns_created(
         results.record_fail(
             "Email/changes returns created", "Failed to import test email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # Call Email/changes with initial state
     changes_call = [
@@ -573,19 +578,19 @@ def test_email_changes_returns_created(
         response = make_jmap_request(api_url, token, [changes_call])
     except Exception as e:
         results.record_fail("Email/changes returns created", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "Email/changes returns created",
             f"No methodResponses: {response}",
         )
-        return
+        return email_ids_created
 
     method_responses = response["methodResponses"]
     if len(method_responses) == 0:
         results.record_fail("Email/changes returns created", "Empty methodResponses")
-        return
+        return email_ids_created
 
     response_name, response_data, _ = method_responses[0]
     if response_name == "error":
@@ -593,14 +598,14 @@ def test_email_changes_returns_created(
             "Email/changes returns created",
             f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
         )
-        return
+        return email_ids_created
 
     if response_name != "Email/changes":
         results.record_fail(
             "Email/changes returns created",
             f"Unexpected method: {response_name}",
         )
-        return
+        return email_ids_created
 
     created = response_data.get("created", [])
     if email_id in created:
@@ -614,15 +619,17 @@ def test_email_changes_returns_created(
             f"emailId {email_id} not in created: {created}",
         )
 
+    return email_ids_created
 
 def test_email_changes_max_changes_limit(
     api_url: str, upload_url: str, token: str, account_id: str, mailbox_id: str, results
-):
+) -> list[str]:
     """
     Test 4: Email/changes maxChanges Limit (RFC 8620 §5.2)
 
     Validates that maxChanges limits the total IDs returned and sets hasMoreChanges.
     """
+    email_ids_created = []
     print()
     print("Test: Email/changes maxChanges limit (RFC 8620 §5.2)...")
 
@@ -632,7 +639,7 @@ def test_email_changes_max_changes_limit(
         results.record_fail(
             "Email/changes maxChanges limit", "Failed to get initial state"
         )
-        return
+        return email_ids_created
 
     # Import 3 emails
     email_ids = []
@@ -642,8 +649,9 @@ def test_email_changes_max_changes_limit(
             results.record_fail(
                 "Email/changes maxChanges limit", "Failed to import test email"
             )
-            return
+            return email_ids_created
         email_ids.append(email_id)
+    email_ids_created.extend(email_ids)
 
     # Call Email/changes with maxChanges=1
     changes_call = [
@@ -660,19 +668,20 @@ def test_email_changes_max_changes_limit(
         response = make_jmap_request(api_url, token, [changes_call])
     except Exception as e:
         results.record_fail("Email/changes maxChanges limit", str(e))
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     if "methodResponses" not in response:
         results.record_fail(
             "Email/changes maxChanges limit",
             f"No methodResponses: {response}",
         )
-        return
+        return email_ids_created
 
     method_responses = response["methodResponses"]
     if len(method_responses) == 0:
         results.record_fail("Email/changes maxChanges limit", "Empty methodResponses")
-        return
+        return email_ids_created
 
     response_name, response_data, _ = method_responses[0]
     if response_name == "error":
@@ -680,14 +689,14 @@ def test_email_changes_max_changes_limit(
             "Email/changes maxChanges limit",
             f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
         )
-        return
+        return email_ids_created
 
     if response_name != "Email/changes":
         results.record_fail(
             "Email/changes maxChanges limit",
             f"Unexpected method: {response_name}",
         )
-        return
+        return email_ids_created
 
     created = response_data.get("created", [])
     updated = response_data.get("updated", [])
@@ -707,7 +716,7 @@ def test_email_changes_max_changes_limit(
             "Email/changes respects maxChanges",
             f"total IDs = {total_ids} (expected <= 1)",
         )
-        return
+        return email_ids_created
 
     # Validate: hasMoreChanges=true since we created 3 but limited to 1
     if has_more is True:
@@ -721,15 +730,17 @@ def test_email_changes_max_changes_limit(
             f"Expected hasMoreChanges=true, got {has_more}",
         )
 
+    return email_ids_created
 
 def test_email_changes_pagination(
     api_url: str, upload_url: str, token: str, account_id: str, mailbox_id: str, results
-):
+) -> list[str]:
     """
     Test 5: Email/changes Pagination (RFC 8620 §5.2)
 
     Validates that paginating through changes returns all emails eventually.
     """
+    email_ids_created = []
     print()
     print("Test: Email/changes pagination (RFC 8620 §5.2)...")
 
@@ -739,7 +750,7 @@ def test_email_changes_pagination(
         results.record_fail(
             "Email/changes pagination", "Failed to get initial state"
         )
-        return
+        return email_ids_created
 
     # Import 3 emails
     expected_email_ids = []
@@ -749,8 +760,9 @@ def test_email_changes_pagination(
             results.record_fail(
                 "Email/changes pagination", "Failed to import test email"
             )
-            return
+            return email_ids_created
         expected_email_ids.append(email_id)
+    email_ids_created.extend(expected_email_ids)
 
     # Paginate through changes with maxChanges=1
     all_created = []
@@ -775,19 +787,19 @@ def test_email_changes_pagination(
             response = make_jmap_request(api_url, token, [changes_call])
         except Exception as e:
             results.record_fail("Email/changes pagination", str(e))
-            return
+            return email_ids_created
 
         if "methodResponses" not in response:
             results.record_fail(
                 "Email/changes pagination",
                 f"No methodResponses: {response}",
             )
-            return
+            return email_ids_created
 
         method_responses = response["methodResponses"]
         if len(method_responses) == 0:
             results.record_fail("Email/changes pagination", "Empty methodResponses")
-            return
+            return email_ids_created
 
         response_name, response_data, _ = method_responses[0]
         if response_name == "error":
@@ -795,14 +807,14 @@ def test_email_changes_pagination(
                 "Email/changes pagination",
                 f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
             )
-            return
+            return email_ids_created
 
         if response_name != "Email/changes":
             results.record_fail(
                 "Email/changes pagination",
                 f"Unexpected method: {response_name}",
             )
-            return
+            return email_ids_created
 
         created = response_data.get("created", [])
         all_created.extend(created)
@@ -825,6 +837,7 @@ def test_email_changes_pagination(
             f"Missing emails: {missing} (found: {all_created})",
         )
 
+    return email_ids_created
 
 def test_email_changes_invalid_state(api_url: str, token: str, account_id: str, results):
     """
@@ -1221,31 +1234,42 @@ def test_email_changes(client, config, results):
 
     results.record_pass("Email/changes tests mailbox created", f"mailboxId: {mailbox_id}")
 
+    all_email_ids = []
+
     # Test 1: Response structure
     test_email_changes_response_structure(api_url, config.token, account_id, results)
 
     # Test 2: State changes after import
-    test_email_state_changes_after_import(
+    all_email_ids.extend(test_email_state_changes_after_import(
         api_url, upload_url, config.token, account_id, mailbox_id, results
-    )
+    ))
 
     # Test 3: Returns created email
-    test_email_changes_returns_created(
+    all_email_ids.extend(test_email_changes_returns_created(
         api_url, upload_url, config.token, account_id, mailbox_id, results
-    )
+    ))
 
     # Test 4: maxChanges limit
-    test_email_changes_max_changes_limit(
+    all_email_ids.extend(test_email_changes_max_changes_limit(
         api_url, upload_url, config.token, account_id, mailbox_id, results
-    )
+    ))
 
     # Test 5: Pagination
-    test_email_changes_pagination(
+    all_email_ids.extend(test_email_changes_pagination(
         api_url, upload_url, config.token, account_id, mailbox_id, results
-    )
+    ))
 
     # Test 6: cannotCalculateChanges error
     test_email_changes_invalid_state(api_url, config.token, account_id, results)
+
+    # Cleanup
+    if all_email_ids:
+        from test_email_set import destroy_emails_and_verify_s3_cleanup
+
+        destroy_emails_and_verify_s3_cleanup(
+            api_url, config.token, account_id, all_email_ids, config, results,
+            test_name_prefix="[email changes cleanup]",
+        )
 
 
 def test_mailbox_changes(client, config, results):
@@ -1419,12 +1443,13 @@ def test_thread_changes_response_structure(
 
 def test_thread_state_changes_after_import(
     api_url: str, upload_url: str, token: str, account_id: str, mailbox_id: str, results
-):
+) -> list[str]:
     """
     Test: Thread State Changes After Email/import (RFC 8620 §5.1)
 
     Validates that Thread state changes after importing a new standalone email.
     """
+    email_ids_created = []
     print()
     print("Test: Thread state changes after import (RFC 8620 §5.1)...")
 
@@ -1434,7 +1459,7 @@ def test_thread_state_changes_after_import(
         results.record_fail(
             "Thread state changes after import", "Failed to get initial state"
         )
-        return
+        return email_ids_created
 
     # Import a standalone email (creates new thread)
     unique_id = str(uuid.uuid4())[:8]
@@ -1456,7 +1481,8 @@ def test_thread_state_changes_after_import(
         results.record_fail(
             "Thread state changes after import", "Failed to import test email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # Get new state
     new_state = get_thread_state(api_url, token, account_id)
@@ -1464,7 +1490,7 @@ def test_thread_state_changes_after_import(
         results.record_fail(
             "Thread state changes after import", "Failed to get new state"
         )
-        return
+        return email_ids_created
 
     # Validate: newState != oldState
     if new_state != initial_state:
@@ -1478,15 +1504,17 @@ def test_thread_state_changes_after_import(
             f"State did not change after import (still {initial_state[:16]}...)",
         )
 
+    return email_ids_created
 
 def test_thread_changes_returns_created(
     api_url: str, upload_url: str, token: str, account_id: str, mailbox_id: str, results
-):
+) -> list[str]:
     """
     Test: Thread/changes Returns Created Thread (RFC 8620 §5.2)
 
     Validates that a newly created thread appears in the created array.
     """
+    email_ids_created = []
     print()
     print("Test: Thread/changes returns created thread (RFC 8620 §5.2)...")
 
@@ -1496,7 +1524,7 @@ def test_thread_changes_returns_created(
         results.record_fail(
             "Thread/changes returns created", "Failed to get initial state"
         )
-        return
+        return email_ids_created
 
     # Import a standalone email (creates new thread)
     unique_id = str(uuid.uuid4())[:8]
@@ -1518,7 +1546,8 @@ def test_thread_changes_returns_created(
         results.record_fail(
             "Thread/changes returns created", "Failed to import test email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # Call Thread/changes with initial state
     changes_call = [
@@ -1534,19 +1563,19 @@ def test_thread_changes_returns_created(
         response = make_jmap_request(api_url, token, [changes_call])
     except Exception as e:
         results.record_fail("Thread/changes returns created", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "Thread/changes returns created",
             f"No methodResponses: {response}",
         )
-        return
+        return email_ids_created
 
     method_responses = response["methodResponses"]
     if len(method_responses) == 0:
         results.record_fail("Thread/changes returns created", "Empty methodResponses")
-        return
+        return email_ids_created
 
     response_name, response_data, _ = method_responses[0]
     if response_name == "error":
@@ -1554,14 +1583,14 @@ def test_thread_changes_returns_created(
             "Thread/changes returns created",
             f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
         )
-        return
+        return email_ids_created
 
     if response_name != "Thread/changes":
         results.record_fail(
             "Thread/changes returns created",
             f"Unexpected method: {response_name}",
         )
-        return
+        return email_ids_created
 
     created = response_data.get("created", [])
     if thread_id in created:
@@ -1575,16 +1604,18 @@ def test_thread_changes_returns_created(
             f"threadId {thread_id} not in created: {created}",
         )
 
+    return email_ids_created
 
 def test_thread_changes_returns_updated(
     api_url: str, upload_url: str, token: str, account_id: str, mailbox_id: str, results
-):
+) -> list[str]:
     """
     Test: Thread/changes Returns Updated Thread (RFC 8620 §5.2)
 
     Validates that when a reply is added to an existing thread, the thread
     appears in the updated array.
     """
+    email_ids_created = []
     print()
     print("Test: Thread/changes returns updated thread (RFC 8620 §5.2)...")
 
@@ -1594,7 +1625,7 @@ def test_thread_changes_returns_updated(
         results.record_fail(
             "Thread/changes returns updated", "Failed to get initial state"
         )
-        return
+        return email_ids_created
 
     # Import a parent email (creates new thread)
     unique_id = str(uuid.uuid4())[:8]
@@ -1618,7 +1649,8 @@ def test_thread_changes_returns_updated(
         results.record_fail(
             "Thread/changes returns updated", "Failed to import parent email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id_parent)
 
     # Get intermediate state (after creating thread, before updating it)
     intermediate_state = get_thread_state(api_url, token, account_id)
@@ -1626,7 +1658,7 @@ def test_thread_changes_returns_updated(
         results.record_fail(
             "Thread/changes returns updated", "Failed to get intermediate state"
         )
-        return
+        return email_ids_created
 
     # Import a reply (updates existing thread)
     email_id_reply, thread_id_reply = import_email_with_headers(
@@ -1645,7 +1677,8 @@ def test_thread_changes_returns_updated(
         results.record_fail(
             "Thread/changes returns updated", "Failed to import reply email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id_reply)
 
     # Verify the reply joined the same thread
     if thread_id != thread_id_reply:
@@ -1653,7 +1686,7 @@ def test_thread_changes_returns_updated(
             "Thread/changes returns updated",
             f"Reply did not join parent thread: parent={thread_id}, reply={thread_id_reply}",
         )
-        return
+        return email_ids_created
 
     # Call Thread/changes with intermediate state
     changes_call = [
@@ -1669,19 +1702,19 @@ def test_thread_changes_returns_updated(
         response = make_jmap_request(api_url, token, [changes_call])
     except Exception as e:
         results.record_fail("Thread/changes returns updated", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "Thread/changes returns updated",
             f"No methodResponses: {response}",
         )
-        return
+        return email_ids_created
 
     method_responses = response["methodResponses"]
     if len(method_responses) == 0:
         results.record_fail("Thread/changes returns updated", "Empty methodResponses")
-        return
+        return email_ids_created
 
     response_name, response_data, _ = method_responses[0]
     if response_name == "error":
@@ -1689,14 +1722,14 @@ def test_thread_changes_returns_updated(
             "Thread/changes returns updated",
             f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
         )
-        return
+        return email_ids_created
 
     if response_name != "Thread/changes":
         results.record_fail(
             "Thread/changes returns updated",
             f"Unexpected method: {response_name}",
         )
-        return
+        return email_ids_created
 
     updated = response_data.get("updated", [])
     if thread_id in updated:
@@ -1710,15 +1743,17 @@ def test_thread_changes_returns_updated(
             f"threadId {thread_id} not in updated: {updated}",
         )
 
+    return email_ids_created
 
 def test_thread_changes_max_changes_limit(
     api_url: str, upload_url: str, token: str, account_id: str, mailbox_id: str, results
-):
+) -> list[str]:
     """
     Test: Thread/changes maxChanges Limit (RFC 8620 §5.2)
 
     Validates that maxChanges limits the total IDs returned and sets hasMoreChanges.
     """
+    email_ids_created = []
     print()
     print("Test: Thread/changes maxChanges limit (RFC 8620 §5.2)...")
 
@@ -1728,7 +1763,7 @@ def test_thread_changes_max_changes_limit(
         results.record_fail(
             "Thread/changes maxChanges limit", "Failed to get initial state"
         )
-        return
+        return email_ids_created
 
     # Import 3 standalone emails (creates 3 new threads)
     thread_ids = []
@@ -1752,7 +1787,8 @@ def test_thread_changes_max_changes_limit(
             results.record_fail(
                 "Thread/changes maxChanges limit", f"Failed to import test email {i}"
             )
-            return
+            return email_ids_created
+        email_ids_created.append(email_id)
         thread_ids.append(thread_id)
 
     # Call Thread/changes with maxChanges=1
@@ -1770,19 +1806,19 @@ def test_thread_changes_max_changes_limit(
         response = make_jmap_request(api_url, token, [changes_call])
     except Exception as e:
         results.record_fail("Thread/changes maxChanges limit", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "Thread/changes maxChanges limit",
             f"No methodResponses: {response}",
         )
-        return
+        return email_ids_created
 
     method_responses = response["methodResponses"]
     if len(method_responses) == 0:
         results.record_fail("Thread/changes maxChanges limit", "Empty methodResponses")
-        return
+        return email_ids_created
 
     response_name, response_data, _ = method_responses[0]
     if response_name == "error":
@@ -1790,14 +1826,14 @@ def test_thread_changes_max_changes_limit(
             "Thread/changes maxChanges limit",
             f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
         )
-        return
+        return email_ids_created
 
     if response_name != "Thread/changes":
         results.record_fail(
             "Thread/changes maxChanges limit",
             f"Unexpected method: {response_name}",
         )
-        return
+        return email_ids_created
 
     created = response_data.get("created", [])
     updated = response_data.get("updated", [])
@@ -1817,7 +1853,7 @@ def test_thread_changes_max_changes_limit(
             "Thread/changes respects maxChanges",
             f"total IDs = {total_ids} (expected <= 1)",
         )
-        return
+        return email_ids_created
 
     # Validate: hasMoreChanges=true since we created 3 but limited to 1
     if has_more is True:
@@ -1831,15 +1867,17 @@ def test_thread_changes_max_changes_limit(
             f"Expected hasMoreChanges=true, got {has_more}",
         )
 
+    return email_ids_created
 
 def test_thread_changes_pagination(
     api_url: str, upload_url: str, token: str, account_id: str, mailbox_id: str, results
-):
+) -> list[str]:
     """
     Test: Thread/changes Pagination (RFC 8620 §5.2)
 
     Validates that paginating through changes returns all threads eventually.
     """
+    email_ids_created = []
     print()
     print("Test: Thread/changes pagination (RFC 8620 §5.2)...")
 
@@ -1849,7 +1887,7 @@ def test_thread_changes_pagination(
         results.record_fail(
             "Thread/changes pagination", "Failed to get initial state"
         )
-        return
+        return email_ids_created
 
     # Import 3 standalone emails (creates 3 new threads)
     expected_thread_ids = []
@@ -1873,7 +1911,8 @@ def test_thread_changes_pagination(
             results.record_fail(
                 "Thread/changes pagination", f"Failed to import test email {i}"
             )
-            return
+            return email_ids_created
+        email_ids_created.append(email_id)
         expected_thread_ids.append(thread_id)
 
     # Paginate through changes with maxChanges=1
@@ -1899,19 +1938,19 @@ def test_thread_changes_pagination(
             response = make_jmap_request(api_url, token, [changes_call])
         except Exception as e:
             results.record_fail("Thread/changes pagination", str(e))
-            return
+            return email_ids_created
 
         if "methodResponses" not in response:
             results.record_fail(
                 "Thread/changes pagination",
                 f"No methodResponses: {response}",
             )
-            return
+            return email_ids_created
 
         method_responses = response["methodResponses"]
         if len(method_responses) == 0:
             results.record_fail("Thread/changes pagination", "Empty methodResponses")
-            return
+            return email_ids_created
 
         response_name, response_data, _ = method_responses[0]
         if response_name == "error":
@@ -1919,14 +1958,14 @@ def test_thread_changes_pagination(
                 "Thread/changes pagination",
                 f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
             )
-            return
+            return email_ids_created
 
         if response_name != "Thread/changes":
             results.record_fail(
                 "Thread/changes pagination",
                 f"Unexpected method: {response_name}",
             )
-            return
+            return email_ids_created
 
         created = response_data.get("created", [])
         all_created.extend(created)
@@ -1949,6 +1988,7 @@ def test_thread_changes_pagination(
             f"Missing threads: {missing} (found: {all_created})",
         )
 
+    return email_ids_created
 
 def test_thread_changes_invalid_state(api_url: str, token: str, account_id: str, results):
     """
@@ -2039,33 +2079,44 @@ def test_thread_changes(client, config, results):
 
     results.record_pass("Thread/changes tests mailbox created", f"mailboxId: {mailbox_id}")
 
+    all_email_ids = []
+
     # Test: Response structure
     test_thread_changes_response_structure(api_url, config.token, account_id, results)
 
     # Test: State changes after import
-    test_thread_state_changes_after_import(
+    all_email_ids.extend(test_thread_state_changes_after_import(
         api_url, upload_url, config.token, account_id, mailbox_id, results
-    )
+    ))
 
     # Test: Returns created thread
-    test_thread_changes_returns_created(
+    all_email_ids.extend(test_thread_changes_returns_created(
         api_url, upload_url, config.token, account_id, mailbox_id, results
-    )
+    ))
 
     # Test: Returns updated thread
-    test_thread_changes_returns_updated(
+    all_email_ids.extend(test_thread_changes_returns_updated(
         api_url, upload_url, config.token, account_id, mailbox_id, results
-    )
+    ))
 
     # Test: maxChanges limit
-    test_thread_changes_max_changes_limit(
+    all_email_ids.extend(test_thread_changes_max_changes_limit(
         api_url, upload_url, config.token, account_id, mailbox_id, results
-    )
+    ))
 
     # Test: Pagination
-    test_thread_changes_pagination(
+    all_email_ids.extend(test_thread_changes_pagination(
         api_url, upload_url, config.token, account_id, mailbox_id, results
-    )
+    ))
 
     # Test: cannotCalculateChanges error
     test_thread_changes_invalid_state(api_url, config.token, account_id, results)
+
+    # Cleanup
+    if all_email_ids:
+        from test_email_set import destroy_emails_and_verify_s3_cleanup
+
+        destroy_emails_and_verify_s3_cleanup(
+            api_url, config.token, account_id, all_email_ids, config, results,
+            test_name_prefix="[thread changes cleanup]",
+        )

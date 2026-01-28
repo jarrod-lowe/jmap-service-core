@@ -397,3 +397,77 @@ paths:
         httpMethod: POST
         uri: "arn:aws:apigateway:${aws_region}:lambda:path/2015-03-31/functions/${blob_download_lambda_arn}/invocations"
         passthroughBehavior: when_no_match
+  /delete/{accountId}/{blobId}:
+    delete:
+      summary: "Blob Delete (Cognito Auth)"
+      description: "Marks a blob as deleted. The actual S3 and DynamoDB cleanup happens asynchronously via DynamoDB Streams."
+      operationId: "deleteCognito"
+      security:
+        - CognitoAuthorizer: []
+      parameters:
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "Account ID that owns the blob"
+        - name: blobId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "ID of the blob to delete"
+      responses:
+        "204":
+          description: "Blob marked for deletion"
+        "401":
+          description: "Unauthorized"
+        "403":
+          description: "Forbidden - account mismatch"
+        "404":
+          description: "Blob not found"
+        "500":
+          description: "Server error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "arn:aws:apigateway:${aws_region}:lambda:path/2015-03-31/functions/${blob_delete_lambda_arn}/invocations"
+        passthroughBehavior: when_no_match
+  /delete-iam/{accountId}/{blobId}:
+    delete:
+      summary: "Blob Delete (IAM Auth)"
+      description: "Marks a blob as deleted. The actual S3 and DynamoDB cleanup happens asynchronously via DynamoDB Streams."
+      operationId: "deleteIam"
+      security:
+        - IamAuthorizer: []
+      parameters:
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "Account ID that owns the blob"
+        - name: blobId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "ID of the blob to delete"
+      responses:
+        "204":
+          description: "Blob marked for deletion"
+        "400":
+          description: "Bad request"
+        "401":
+          description: "Unauthorized"
+        "403":
+          description: "Forbidden"
+        "404":
+          description: "Blob not found"
+        "500":
+          description: "Server error"
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri: "arn:aws:apigateway:${aws_region}:lambda:path/2015-03-31/functions/${blob_delete_lambda_arn}/invocations"
+        passthroughBehavior: when_no_match

@@ -404,6 +404,58 @@ func TestDownload_DynamoDBFailure(t *testing.T) {
 	}
 }
 
+// Test: Deleted blob returns 404
+func TestDownload_DeletedBlob_Returns404(t *testing.T) {
+	blob := &BlobRecord{
+		BlobID:      "blob-123",
+		AccountID:   "user-456",
+		Size:        1024,
+		ContentType: "application/octet-stream",
+		S3Key:       "user-456/blob-123",
+		CreatedAt:   "2024-01-01T00:00:00Z",
+		DeletedAt:   "2024-06-01T00:00:00Z",
+	}
+
+	db := &mockBlobDB{blob: blob}
+	signer := &mockURLSigner{signedURL: "https://cdn.example.com/signed"}
+	secrets := &mockSecretsReader{}
+	setupTestDeps(db, signer, secrets)
+
+	request := events.APIGatewayProxyRequest{
+		PathParameters: map[string]string{
+			"accountId": "user-456",
+			"blobId":    "blob-123",
+		},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "req-abc",
+			Authorizer: map[string]any{
+				"claims": map[string]any{
+					"sub": "user-456",
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	if response.StatusCode != 404 {
+		t.Errorf("expected status code 404, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+
+	var errResp ErrorResponse
+	if err := json.Unmarshal([]byte(response.Body), &errResp); err != nil {
+		t.Fatalf("failed to unmarshal error response: %v", err)
+	}
+
+	if errResp.Type != "notFound" {
+		t.Errorf("expected error type 'notFound', got '%s'", errResp.Type)
+	}
+}
+
 // Test 6: URL signing failure returns 500
 func TestDownload_SigningFailure(t *testing.T) {
 	blob := &BlobRecord{

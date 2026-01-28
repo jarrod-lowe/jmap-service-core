@@ -2,26 +2,19 @@ package main
 
 import (
 	"context"
-	"crypto/rsa"
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"log/slog"
 	"os"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/feature/cloudfront/sign"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/jarrod-lowe/jmap-service-core/internal/db"
 	"github.com/jarrod-lowe/jmap-service-core/internal/plugin"
 )
@@ -31,21 +24,6 @@ var (
 		Level: slog.LevelInfo,
 	}))
 )
-
-// BlobDB handles DynamoDB operations for blob metadata
-type BlobDB interface {
-	GetBlob(ctx context.Context, accountID, blobID string) (*BlobRecord, error)
-}
-
-// URLSigner generates CloudFront signed URLs
-type URLSigner interface {
-	Sign(url string, expiry time.Time) (string, error)
-}
-
-// SecretsReader reads secrets from Secrets Manager
-type SecretsReader interface {
-	GetPrivateKey(ctx context.Context, secretARN string) (string, error)
-}
 
 // BlobRecord represents a blob record from DynamoDB
 type BlobRecord struct {
@@ -58,57 +36,15 @@ type BlobRecord struct {
 	DeletedAt   string `dynamodbav:"deletedAt,omitempty"`
 }
 
-// ParsedBlobID contains the parsed components of a potentially composite blobId
-type ParsedBlobID struct {
-	BaseBlobID string
-	HasRange   bool
-	StartByte  int64
-	EndByte    int64
+// BlobDB handles DynamoDB operations for blob metadata
+type BlobDB interface {
+	GetBlob(ctx context.Context, accountID, blobID string) (*BlobRecord, error)
+	MarkBlobDeleted(ctx context.Context, accountID, blobID string, deletedAt string) error
 }
 
-// ParseBlobID parses a blobId which may be composite (baseBlobId,startByte,endByte)
-// Returns the parsed components. For simple blobIds, HasRange will be false.
-func ParseBlobID(blobID string) (ParsedBlobID, error) {
-	parts := strings.Split(blobID, ",")
-
-	switch len(parts) {
-	case 1, 2:
-		// Simple blobId (no commas or one comma - treated as simple)
-		return ParsedBlobID{BaseBlobID: blobID, HasRange: false}, nil
-
-	case 3:
-		// Composite blobId: baseBlobId,startByte,endByte
-		baseBlobID := parts[0]
-
-		startByte, err := strconv.ParseInt(parts[1], 10, 64)
-		if err != nil {
-			return ParsedBlobID{}, fmt.Errorf("invalid start byte: %w", err)
-		}
-
-		endByte, err := strconv.ParseInt(parts[2], 10, 64)
-		if err != nil {
-			return ParsedBlobID{}, fmt.Errorf("invalid end byte: %w", err)
-		}
-
-		if startByte < 0 {
-			return ParsedBlobID{}, fmt.Errorf("start byte must be non-negative")
-		}
-
-		if startByte >= endByte {
-			return ParsedBlobID{}, fmt.Errorf("start byte must be less than end byte")
-		}
-
-		return ParsedBlobID{
-			BaseBlobID: baseBlobID,
-			HasRange:   true,
-			StartByte:  startByte,
-			EndByte:    endByte,
-		}, nil
-
-	default:
-		// Too many commas
-		return ParsedBlobID{}, fmt.Errorf("invalid blobId format: too many commas")
-	}
+// PrincipalChecker checks if a caller is allowed to access IAM endpoints
+type PrincipalChecker interface {
+	IsAllowedPrincipal(callerARN string) bool
 }
 
 // ErrorResponse is the error response format
@@ -124,31 +60,15 @@ type Response struct {
 	Body       string            `json:"body"`
 }
 
-// Config holds application configuration
-type Config struct {
-	CloudFrontDomain   string
-	CloudFrontKeyPairID string
-	PrivateKeySecretARN string
-	SignedURLExpiry    time.Duration
-}
-
-// PrincipalChecker checks if a caller is allowed to access IAM endpoints
-type PrincipalChecker interface {
-	IsAllowedPrincipal(callerARN string) bool
-}
-
 // Dependencies for handler (injectable for testing)
 type Dependencies struct {
-	DB            BlobDB
-	Signer        URLSigner
-	SecretsReader SecretsReader
-	Registry      PrincipalChecker
-	Config        Config
+	DB       BlobDB
+	Registry PrincipalChecker
 }
 
 var deps *Dependencies
 
-// handler processes blob download requests
+// handler processes blob delete requests
 func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Response, error) {
 	// Extract accountId from path
 	pathAccountID := request.PathParameters["accountId"]
@@ -160,17 +80,6 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 	blobID := request.PathParameters["blobId"]
 	if blobID == "" {
 		return errorResponse(400, "invalidArguments", "Missing blobId in path")
-	}
-
-	// Parse blobId (may be composite: baseBlobId,startByte,endByte)
-	parsedBlobID, err := ParseBlobID(blobID)
-	if err != nil {
-		logger.WarnContext(ctx, "Invalid blobId format",
-			slog.String("request_id", request.RequestContext.RequestID),
-			slog.String("blob_id", blobID),
-			slog.String("error", err.Error()),
-		)
-		return errorResponse(400, "invalidArguments", "Invalid blobId format")
 	}
 
 	// Extract authenticated account ID (from JWT or path for IAM)
@@ -205,8 +114,8 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 		return errorResponse(403, "forbidden", "Account ID mismatch")
 	}
 
-	// Look up blob in DynamoDB using base blob ID (without range suffix)
-	blob, err := deps.DB.GetBlob(ctx, pathAccountID, parsedBlobID.BaseBlobID)
+	// Look up blob in DynamoDB
+	blob, err := deps.DB.GetBlob(ctx, pathAccountID, blobID)
 	if err != nil {
 		logger.ErrorContext(ctx, "Failed to get blob from DynamoDB",
 			slog.String("request_id", request.RequestContext.RequestID),
@@ -225,7 +134,7 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 		return errorResponse(404, "notFound", "Blob not found")
 	}
 
-	// Verify blob ownership (defense in depth - should match since we query by account)
+	// Verify blob ownership (defense in depth)
 	if blob.AccountID != pathAccountID {
 		logger.WarnContext(ctx, "Blob ownership mismatch",
 			slog.String("request_id", request.RequestContext.RequestID),
@@ -235,43 +144,31 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 		return errorResponse(404, "notFound", "Blob not found")
 	}
 
-	// Check if blob has been marked as deleted
+	// Check if already deleted
 	if blob.DeletedAt != "" {
-		logger.InfoContext(ctx, "Blob is deleted",
-			slog.String("request_id", request.RequestContext.RequestID),
-			slog.String("account_id", pathAccountID),
-			slog.String("blob_id", blobID),
-		)
 		return errorResponse(404, "notFound", "Blob not found")
 	}
 
-	// Generate CloudFront signed URL
-	// Use the original blobId (which may include range suffix) so CloudFront function can extract it
-	blobURL := fmt.Sprintf("https://%s/blobs/%s/%s", deps.Config.CloudFrontDomain, pathAccountID, blobID)
-	expiry := time.Now().Add(deps.Config.SignedURLExpiry)
-
-	signedURL, err := deps.Signer.Sign(blobURL, expiry)
-	if err != nil {
-		logger.ErrorContext(ctx, "Failed to sign URL",
+	// Mark blob as deleted
+	deletedAt := time.Now().UTC().Format(time.RFC3339)
+	if err := deps.DB.MarkBlobDeleted(ctx, pathAccountID, blobID, deletedAt); err != nil {
+		logger.ErrorContext(ctx, "Failed to mark blob as deleted",
 			slog.String("request_id", request.RequestContext.RequestID),
 			slog.String("error", err.Error()),
 		)
-		return errorResponse(500, "serverFail", "Failed to generate download URL")
+		return errorResponse(500, "serverFail", "Failed to delete blob")
 	}
 
-	logger.InfoContext(ctx, "Blob download redirect",
+	logger.InfoContext(ctx, "Blob marked as deleted",
 		slog.String("request_id", request.RequestContext.RequestID),
 		slog.String("account_id", pathAccountID),
 		slog.String("blob_id", blobID),
 	)
 
 	return Response{
-		StatusCode: 302,
-		Headers: map[string]string{
-			"Location":      signedURL,
-			"Cache-Control": "no-store",
-		},
-		Body: "",
+		StatusCode: 204,
+		Headers:    map[string]string{},
+		Body:       "",
 	}, nil
 }
 
@@ -375,75 +272,23 @@ func (d *DynamoDBBlobDB) GetBlob(ctx context.Context, accountID, blobID string) 
 	return &record, nil
 }
 
-// CloudFrontURLSigner implements URLSigner using CloudFront SDK
-type CloudFrontURLSigner struct {
-	signer *sign.URLSigner
-}
-
-// NewCloudFrontURLSigner creates a new CloudFrontURLSigner
-func NewCloudFrontURLSigner(keyPairID, privateKeyPEM string) (*CloudFrontURLSigner, error) {
-	// Parse the PEM-encoded private key
-	block, _ := pem.Decode([]byte(privateKeyPEM))
-	if block == nil {
-		return nil, fmt.Errorf("failed to decode PEM block")
-	}
-
-	var privateKey *rsa.PrivateKey
-	var err error
-
-	// Try PKCS#1 first, then PKCS#8
-	privateKey, err = x509.ParsePKCS1PrivateKey(block.Bytes)
-	if err != nil {
-		// Try PKCS#8
-		key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse private key: %w", err)
-		}
-		var ok bool
-		privateKey, ok = key.(*rsa.PrivateKey)
-		if !ok {
-			return nil, fmt.Errorf("private key is not RSA")
-		}
-	}
-
-	signer := sign.NewURLSigner(keyPairID, privateKey)
-	return &CloudFrontURLSigner{signer: signer}, nil
-}
-
-// Sign generates a signed URL for the given resource
-func (s *CloudFrontURLSigner) Sign(url string, expiry time.Time) (string, error) {
-	signedURL, err := s.signer.Sign(url, expiry)
-	if err != nil {
-		return "", fmt.Errorf("failed to generate signed URL: %w", err)
-	}
-
-	return signedURL, nil
-}
-
-// SecretsManagerReader implements SecretsReader using AWS Secrets Manager
-type SecretsManagerReader struct {
-	client *secretsmanager.Client
-}
-
-// NewSecretsManagerReader creates a new SecretsManagerReader
-func NewSecretsManagerReader(client *secretsmanager.Client) *SecretsManagerReader {
-	return &SecretsManagerReader{client: client}
-}
-
-// GetPrivateKey retrieves the private key from Secrets Manager
-func (s *SecretsManagerReader) GetPrivateKey(ctx context.Context, secretARN string) (string, error) {
-	result, err := s.client.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{
-		SecretId: aws.String(secretARN),
+// MarkBlobDeleted sets the deletedAt attribute on a blob record
+func (d *DynamoDBBlobDB) MarkBlobDeleted(ctx context.Context, accountID, blobID string, deletedAt string) error {
+	_, err := d.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(d.tableName),
+		Key: map[string]types.AttributeValue{
+			"pk": &types.AttributeValueMemberS{Value: fmt.Sprintf("ACCOUNT#%s", accountID)},
+			"sk": &types.AttributeValueMemberS{Value: fmt.Sprintf("BLOB#%s", blobID)},
+		},
+		UpdateExpression: aws.String("SET #deletedAt = :deletedAt"),
+		ExpressionAttributeNames: map[string]string{
+			"#deletedAt": "deletedAt",
+		},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":deletedAt": &types.AttributeValueMemberS{Value: deletedAt},
+		},
 	})
-	if err != nil {
-		return "", err
-	}
-
-	if result.SecretString == nil {
-		return "", fmt.Errorf("secret value is empty")
-	}
-
-	return *result.SecretString, nil
+	return err
 }
 
 func main() {
@@ -456,31 +301,6 @@ func main() {
 		panic("DYNAMODB_TABLE environment variable is required")
 	}
 
-	cloudfrontDomain := os.Getenv("CLOUDFRONT_DOMAIN")
-	if cloudfrontDomain == "" {
-		logger.Error("FATAL: CLOUDFRONT_DOMAIN environment variable is required")
-		panic("CLOUDFRONT_DOMAIN environment variable is required")
-	}
-
-	keyPairID := os.Getenv("CLOUDFRONT_KEY_PAIR_ID")
-	if keyPairID == "" {
-		logger.Error("FATAL: CLOUDFRONT_KEY_PAIR_ID environment variable is required")
-		panic("CLOUDFRONT_KEY_PAIR_ID environment variable is required")
-	}
-
-	privateKeySecretARN := os.Getenv("PRIVATE_KEY_SECRET_ARN")
-	if privateKeySecretARN == "" {
-		logger.Error("FATAL: PRIVATE_KEY_SECRET_ARN environment variable is required")
-		panic("PRIVATE_KEY_SECRET_ARN environment variable is required")
-	}
-
-	expirySeconds := 300 // default 5 minutes
-	if expiryStr := os.Getenv("SIGNED_URL_EXPIRY_SECONDS"); expiryStr != "" {
-		if parsed, err := strconv.Atoi(expiryStr); err == nil {
-			expirySeconds = parsed
-		}
-	}
-
 	// Initialize AWS clients
 	cfg, err := awsconfig.LoadDefaultConfig(ctx)
 	if err != nil {
@@ -491,26 +311,6 @@ func main() {
 	}
 
 	dynamoClient := dynamodb.NewFromConfig(cfg)
-	secretsClient := secretsmanager.NewFromConfig(cfg)
-
-	// Read private key from Secrets Manager
-	secretsReader := NewSecretsManagerReader(secretsClient)
-	privateKey, err := secretsReader.GetPrivateKey(ctx, privateKeySecretARN)
-	if err != nil {
-		logger.Error("FATAL: Failed to read private key from Secrets Manager",
-			slog.String("error", err.Error()),
-		)
-		panic(err)
-	}
-
-	// Create CloudFront URL signer
-	signer, err := NewCloudFrontURLSigner(keyPairID, privateKey)
-	if err != nil {
-		logger.Error("FATAL: Failed to create CloudFront signer",
-			slog.String("error", err.Error()),
-		)
-		panic(err)
-	}
 
 	// Initialize database client for plugin registry
 	dbClient, err := db.NewClient(ctx, tableName)
@@ -531,16 +331,8 @@ func main() {
 	}
 
 	deps = &Dependencies{
-		DB:            NewDynamoDBBlobDB(dynamoClient, tableName),
-		Signer:        signer,
-		SecretsReader: secretsReader,
-		Registry:      registry,
-		Config: Config{
-			CloudFrontDomain:    cloudfrontDomain,
-			CloudFrontKeyPairID: keyPairID,
-			PrivateKeySecretARN: privateKeySecretARN,
-			SignedURLExpiry:     time.Duration(expirySeconds) * time.Second,
-		},
+		DB:       NewDynamoDBBlobDB(dynamoClient, tableName),
+		Registry: registry,
 	}
 
 	lambda.Start(handler)

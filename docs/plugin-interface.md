@@ -367,6 +367,7 @@ IAM access control applies to all IAM-authenticated endpoints:
 - `POST /jmap-iam/{accountId}` - JMAP API for machine clients
 - `POST /upload-iam/{accountId}` - Blob upload for machine clients
 - `GET /download-iam/{accountId}/{blobId}` - Blob download for machine clients
+- `DELETE /delete-iam/{accountId}/{blobId}` - Blob delete for machine clients
 
 ### DynamoDB Record Field
 

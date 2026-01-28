@@ -221,6 +221,15 @@ def test_result_references(client: Client, config, results):
         session.api_url, config.token, account_id, mailbox_id, results
     )
 
+    # Cleanup: destroy all test emails
+    if email_ids:
+        from test_email_set import destroy_emails_and_verify_s3_cleanup
+
+        destroy_emails_and_verify_s3_cleanup(
+            session.api_url, config.token, account_id, email_ids, config, results,
+            test_name_prefix="[result references cleanup]",
+        )
+
 
 def test_simple_result_reference(
     api_url: str, token: str, account_id: str, mailbox_id: str, results

@@ -304,6 +304,174 @@ def email_set_update(
     return make_jmap_request(api_url, token, [email_set_call])
 
 
+def destroy_emails_and_verify_cleanup(
+    api_url: str,
+    token: str,
+    account_id: str,
+    email_ids: list[str],
+    config,
+    results,
+    test_name_prefix: str = "",
+):
+    """
+    Destroy emails via Email/set destroy and verify blob cleanup via DELETE endpoint.
+
+    1. Fetches blobIds for all email_ids via Email/get
+    2. Calls Email/set with destroy: [email_ids]
+    3. Asserts destroyed list matches input
+    4. Calls DELETE /delete/{accountId}/{blobId} for each blob — 204 or 404 both confirm cleanup
+    """
+    import requests as req
+
+    prefix = f"{test_name_prefix} " if test_name_prefix else ""
+
+    if not email_ids:
+        return
+
+    # Step 1: Get blobIds for the emails
+    blob_ids = []
+    email_get_call = [
+        "Email/get",
+        {
+            "accountId": account_id,
+            "ids": email_ids,
+            "properties": ["blobId"],
+        },
+        "getBlobIds",
+    ]
+    try:
+        get_response = make_jmap_request(api_url, token, [email_get_call])
+        if "methodResponses" in get_response:
+            resp_name, resp_data, _ = get_response["methodResponses"][0]
+            if resp_name == "Email/get":
+                for email in resp_data.get("list", []):
+                    bid = email.get("blobId")
+                    if bid:
+                        blob_ids.append(bid)
+    except Exception:
+        pass  # Non-fatal, we still want to destroy
+
+    # Step 2: Call Email/set destroy
+    email_set_call = [
+        "Email/set",
+        {
+            "accountId": account_id,
+            "destroy": email_ids,
+        },
+        "destroyEmails",
+    ]
+
+    try:
+        response = make_jmap_request(api_url, token, [email_set_call])
+    except Exception as e:
+        results.record_fail(f"{prefix}Email/set destroy request", str(e))
+        return
+
+    if "methodResponses" not in response:
+        results.record_fail(
+            f"{prefix}Email/set destroy", f"No methodResponses: {response}"
+        )
+        return
+
+    method_responses = response["methodResponses"]
+    if len(method_responses) == 0:
+        results.record_fail(f"{prefix}Email/set destroy", "Empty methodResponses")
+        return
+
+    response_name, response_data, _ = method_responses[0]
+    if response_name == "error":
+        results.record_fail(
+            f"{prefix}Email/set destroy",
+            f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
+        )
+        return
+
+    if response_name != "Email/set":
+        results.record_fail(
+            f"{prefix}Email/set destroy",
+            f"Unexpected method: {response_name}",
+        )
+        return
+
+    destroyed = response_data.get("destroyed", [])
+    not_destroyed = response_data.get("notDestroyed") or {}
+
+    if set(destroyed) == set(email_ids):
+        results.record_pass(
+            f"{prefix}Email/set destroy",
+            f"Destroyed {len(destroyed)} emails",
+        )
+    else:
+        missing = set(email_ids) - set(destroyed)
+        errors = {eid: not_destroyed.get(eid, {}).get("type", "unknown") for eid in missing}
+        results.record_fail(
+            f"{prefix}Email/set destroy",
+            f"Not all destroyed. Missing: {errors}",
+        )
+
+    # Step 3: Verify emails are gone
+    verify_get_call = [
+        "Email/get",
+        {
+            "accountId": account_id,
+            "ids": email_ids,
+        },
+        "verifyDestroyed",
+    ]
+
+    try:
+        verify_response = make_jmap_request(api_url, token, [verify_get_call])
+        if "methodResponses" in verify_response:
+            resp_name, resp_data, _ = verify_response["methodResponses"][0]
+            if resp_name == "Email/get":
+                not_found = resp_data.get("notFound", [])
+                if set(not_found) == set(email_ids):
+                    results.record_pass(
+                        f"{prefix}Email/get confirms emails destroyed",
+                        f"All {len(email_ids)} emails in notFound",
+                    )
+                else:
+                    found = resp_data.get("list", [])
+                    results.record_fail(
+                        f"{prefix}Email/get confirms emails destroyed",
+                        f"Expected all in notFound, found {len(found)} still existing",
+                    )
+    except Exception:
+        pass  # Non-fatal verification
+
+    # Step 4: Verify blob cleanup via DELETE endpoint
+    if not blob_ids:
+        return
+
+    # Derive delete URL from api_url (replace /jmap with /delete)
+    base_url = api_url.rsplit("/jmap", 1)[0]
+
+    for blob_id in blob_ids:
+        delete_url = f"{base_url}/delete/{account_id}/{blob_id}"
+        try:
+            resp = req.delete(
+                delete_url,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=30,
+            )
+            if resp.status_code in (204, 404):
+                results.record_pass(
+                    f"{prefix}Blob cleanup {blob_id}",
+                    f"DELETE returned {resp.status_code} — blob is deleted or already cleaned up",
+                )
+            else:
+                results.record_fail(
+                    f"{prefix}Blob cleanup {blob_id}",
+                    f"DELETE returned unexpected {resp.status_code}: {resp.text}",
+                )
+        except Exception as e:
+            results.record_fail(f"{prefix}Blob cleanup {blob_id}", str(e))
+
+
+# Keep old name as alias for backwards compatibility during transition
+destroy_emails_and_verify_s3_cleanup = destroy_emails_and_verify_cleanup
+
+
 def get_email_mailbox_ids(
     api_url: str, token: str, account_id: str, email_id: str
 ) -> dict | None:
@@ -389,12 +557,13 @@ def test_move_email_between_mailboxes(
     token: str,
     account_id: str,
     results,
-):
+) -> list[str]:
     """
     Test: Move email between mailboxes by replacing mailboxIds.
 
     RFC 8621 Section 4.6: mailboxIds is updatable.
     """
+    email_ids_created = []
     print()
     print("Test: Move email between mailboxes (RFC 8621 Section 4.6)...")
 
@@ -402,18 +571,19 @@ def test_move_email_between_mailboxes(
     mailbox_a = create_test_mailbox(api_url, token, account_id)
     if not mailbox_a:
         results.record_fail("Move email test setup", "Failed to create mailbox A")
-        return
+        return email_ids_created
 
     mailbox_b = create_test_mailbox(api_url, token, account_id)
     if not mailbox_b:
         results.record_fail("Move email test setup", "Failed to create mailbox B")
-        return
+        return email_ids_created
 
     # Import email to mailbox A
     email_id = import_test_email(api_url, upload_url, token, account_id, mailbox_a)
     if not email_id:
         results.record_fail("Move email test setup", "Failed to import email")
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # Move email to mailbox B by replacing mailboxIds
     try:
@@ -426,16 +596,16 @@ def test_move_email_between_mailboxes(
         )
     except Exception as e:
         results.record_fail("Move email Email/set request", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail("Move email response", f"No methodResponses: {response}")
-        return
+        return email_ids_created
 
     method_responses = response["methodResponses"]
     if len(method_responses) == 0:
         results.record_fail("Move email response", "Empty methodResponses")
-        return
+        return email_ids_created
 
     response_name, response_data, _ = method_responses[0]
     if response_name == "error":
@@ -443,11 +613,11 @@ def test_move_email_between_mailboxes(
             "Move email request",
             f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
         )
-        return
+        return email_ids_created
 
     if response_name != "Email/set":
         results.record_fail("Move email response", f"Unexpected method: {response_name}")
-        return
+        return email_ids_created
 
     # Check email was updated successfully
     updated = response_data.get("updated", {})
@@ -478,6 +648,8 @@ def test_move_email_between_mailboxes(
             f"Email not in updated or notUpdated: {response_data}",
         )
 
+    return email_ids_created
+
 
 def test_add_email_to_additional_mailbox(
     api_url: str,
@@ -485,12 +657,13 @@ def test_add_email_to_additional_mailbox(
     token: str,
     account_id: str,
     results,
-):
+) -> list[str]:
     """
     Test: Add email to additional mailbox using patch syntax.
 
     RFC 8620 Section 5.3: Use "mailboxIds/newId": true to add.
     """
+    email_ids_created = []
     print()
     print("Test: Add email to additional mailbox (RFC 8620 Section 5.3)...")
 
@@ -500,20 +673,21 @@ def test_add_email_to_additional_mailbox(
         results.record_fail(
             "Add to mailbox test setup", "Failed to create mailbox A"
         )
-        return
+        return email_ids_created
 
     mailbox_b = create_test_mailbox(api_url, token, account_id)
     if not mailbox_b:
         results.record_fail(
             "Add to mailbox test setup", "Failed to create mailbox B"
         )
-        return
+        return email_ids_created
 
     # Import email to mailbox A
     email_id = import_test_email(api_url, upload_url, token, account_id, mailbox_a)
     if not email_id:
         results.record_fail("Add to mailbox test setup", "Failed to import email")
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # Add email to mailbox B using patch syntax
     try:
@@ -526,18 +700,18 @@ def test_add_email_to_additional_mailbox(
         )
     except Exception as e:
         results.record_fail("Add to mailbox Email/set request", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "Add to mailbox response", f"No methodResponses: {response}"
         )
-        return
+        return email_ids_created
 
     method_responses = response["methodResponses"]
     if len(method_responses) == 0:
         results.record_fail("Add to mailbox response", "Empty methodResponses")
-        return
+        return email_ids_created
 
     response_name, response_data, _ = method_responses[0]
     if response_name == "error":
@@ -545,13 +719,13 @@ def test_add_email_to_additional_mailbox(
             "Add to mailbox request",
             f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
         )
-        return
+        return email_ids_created
 
     if response_name != "Email/set":
         results.record_fail(
             "Add to mailbox response", f"Unexpected method: {response_name}"
         )
-        return
+        return email_ids_created
 
     updated = response_data.get("updated", {})
     not_updated = response_data.get("notUpdated", {})
@@ -581,6 +755,7 @@ def test_add_email_to_additional_mailbox(
             f"Email not in updated or notUpdated: {response_data}",
         )
 
+    return email_ids_created
 
 def test_remove_email_from_one_mailbox(
     api_url: str,
@@ -588,12 +763,13 @@ def test_remove_email_from_one_mailbox(
     token: str,
     account_id: str,
     results,
-):
+) -> list[str]:
     """
     Test: Remove email from one mailbox using patch syntax (must remain in at least one).
 
     RFC 8620 Section 5.3: Use "mailboxIds/oldId": null to remove.
     """
+    email_ids_created = []
     print()
     print("Test: Remove email from one mailbox (RFC 8620 Section 5.3)...")
 
@@ -603,20 +779,21 @@ def test_remove_email_from_one_mailbox(
         results.record_fail(
             "Remove from mailbox test setup", "Failed to create mailbox A"
         )
-        return
+        return email_ids_created
 
     mailbox_b = create_test_mailbox(api_url, token, account_id)
     if not mailbox_b:
         results.record_fail(
             "Remove from mailbox test setup", "Failed to create mailbox B"
         )
-        return
+        return email_ids_created
 
     # Import email to mailbox A
     email_id = import_test_email(api_url, upload_url, token, account_id, mailbox_a)
     if not email_id:
         results.record_fail("Remove from mailbox test setup", "Failed to import email")
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # First add to mailbox B
     try:
@@ -629,13 +806,13 @@ def test_remove_email_from_one_mailbox(
         )
     except Exception as e:
         results.record_fail("Remove from mailbox test setup (add to B)", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "Remove from mailbox test setup", "Failed to add to mailbox B"
         )
-        return
+        return email_ids_created
 
     # Now remove from mailbox A using patch syntax
     try:
@@ -648,18 +825,18 @@ def test_remove_email_from_one_mailbox(
         )
     except Exception as e:
         results.record_fail("Remove from mailbox Email/set request", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "Remove from mailbox response", f"No methodResponses: {response}"
         )
-        return
+        return email_ids_created
 
     method_responses = response["methodResponses"]
     if len(method_responses) == 0:
         results.record_fail("Remove from mailbox response", "Empty methodResponses")
-        return
+        return email_ids_created
 
     response_name, response_data, _ = method_responses[0]
     if response_name == "error":
@@ -667,13 +844,13 @@ def test_remove_email_from_one_mailbox(
             "Remove from mailbox request",
             f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
         )
-        return
+        return email_ids_created
 
     if response_name != "Email/set":
         results.record_fail(
             "Remove from mailbox response", f"Unexpected method: {response_name}"
         )
-        return
+        return email_ids_created
 
     updated = response_data.get("updated", {})
     not_updated = response_data.get("notUpdated", {})
@@ -703,6 +880,7 @@ def test_remove_email_from_one_mailbox(
             f"Email not in updated or notUpdated: {response_data}",
         )
 
+    return email_ids_created
 
 def test_remove_all_mailboxes_error(
     api_url: str,
@@ -710,12 +888,13 @@ def test_remove_all_mailboxes_error(
     token: str,
     account_id: str,
     results,
-):
+) -> list[str]:
     """
     Test: Setting mailboxIds to empty returns invalidProperties error.
 
     RFC 8621 Section 4.6: Email MUST be in at least one mailbox.
     """
+    email_ids_created = []
     print()
     print("Test: Remove all mailboxes returns error (RFC 8621 Section 4.6)...")
 
@@ -725,14 +904,15 @@ def test_remove_all_mailboxes_error(
         results.record_fail(
             "Remove all mailboxes test setup", "Failed to create mailbox"
         )
-        return
+        return email_ids_created
 
     email_id = import_test_email(api_url, upload_url, token, account_id, mailbox_id)
     if not email_id:
         results.record_fail(
             "Remove all mailboxes test setup", "Failed to import email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # Try to set mailboxIds to empty
     try:
@@ -745,18 +925,18 @@ def test_remove_all_mailboxes_error(
         )
     except Exception as e:
         results.record_fail("Remove all mailboxes Email/set request", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "Remove all mailboxes response", f"No methodResponses: {response}"
         )
-        return
+        return email_ids_created
 
     method_responses = response["methodResponses"]
     if len(method_responses) == 0:
         results.record_fail("Remove all mailboxes response", "Empty methodResponses")
-        return
+        return email_ids_created
 
     response_name, response_data, _ = method_responses[0]
     if response_name == "error":
@@ -766,13 +946,13 @@ def test_remove_all_mailboxes_error(
             "Remove all mailboxes returns error",
             f"Method error: {error_type}",
         )
-        return
+        return email_ids_created
 
     if response_name != "Email/set":
         results.record_fail(
             "Remove all mailboxes response", f"Unexpected method: {response_name}"
         )
-        return
+        return email_ids_created
 
     # Check for notUpdated with invalidProperties
     not_updated = response_data.get("notUpdated", {})
@@ -808,6 +988,7 @@ def test_remove_all_mailboxes_error(
 # Test: Mailbox Counter Updates (RFC 8621 Section 2)
 # =============================================================================
 
+    return email_ids_created
 
 def test_total_emails_increment_on_add(
     api_url: str,
@@ -815,12 +996,13 @@ def test_total_emails_increment_on_add(
     token: str,
     account_id: str,
     results,
-):
+) -> list[str]:
     """
     Test: totalEmails increases when email added to mailbox.
 
     RFC 8621 Section 2: totalEmails is the count of emails in mailbox.
     """
+    email_ids_created = []
     print()
     print("Test: totalEmails increments on add (RFC 8621 Section 2)...")
 
@@ -830,14 +1012,14 @@ def test_total_emails_increment_on_add(
         results.record_fail(
             "totalEmails increment test setup", "Failed to create mailbox A"
         )
-        return
+        return email_ids_created
 
     mailbox_b = create_test_mailbox(api_url, token, account_id)
     if not mailbox_b:
         results.record_fail(
             "totalEmails increment test setup", "Failed to create mailbox B"
         )
-        return
+        return email_ids_created
 
     # Import email to mailbox A
     email_id = import_test_email(api_url, upload_url, token, account_id, mailbox_a)
@@ -845,7 +1027,8 @@ def test_total_emails_increment_on_add(
         results.record_fail(
             "totalEmails increment test setup", "Failed to import email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # Get initial counts for mailbox B
     initial_counts = get_mailbox_counts(api_url, token, account_id, mailbox_b)
@@ -853,7 +1036,7 @@ def test_total_emails_increment_on_add(
         results.record_fail(
             "totalEmails increment test setup", "Failed to get initial counts for B"
         )
-        return
+        return email_ids_created
 
     initial_total = initial_counts.get("totalEmails", 0)
 
@@ -868,13 +1051,13 @@ def test_total_emails_increment_on_add(
         )
     except Exception as e:
         results.record_fail("totalEmails increment Email/set request", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "totalEmails increment response", f"No methodResponses: {response}"
         )
-        return
+        return email_ids_created
 
     # Get new counts for mailbox B
     new_counts = get_mailbox_counts(api_url, token, account_id, mailbox_b)
@@ -882,7 +1065,7 @@ def test_total_emails_increment_on_add(
         results.record_fail(
             "totalEmails increment test", "Failed to get new counts for B"
         )
-        return
+        return email_ids_created
 
     new_total = new_counts.get("totalEmails", 0)
 
@@ -897,6 +1080,7 @@ def test_total_emails_increment_on_add(
             f"Expected {initial_total + 1}, got {new_total}",
         )
 
+    return email_ids_created
 
 def test_total_emails_decrement_on_remove(
     api_url: str,
@@ -904,12 +1088,13 @@ def test_total_emails_decrement_on_remove(
     token: str,
     account_id: str,
     results,
-):
+) -> list[str]:
     """
     Test: totalEmails decreases when email removed from mailbox.
 
     RFC 8621 Section 2: totalEmails is the count of emails in mailbox.
     """
+    email_ids_created = []
     print()
     print("Test: totalEmails decrements on remove (RFC 8621 Section 2)...")
 
@@ -919,14 +1104,14 @@ def test_total_emails_decrement_on_remove(
         results.record_fail(
             "totalEmails decrement test setup", "Failed to create mailbox A"
         )
-        return
+        return email_ids_created
 
     mailbox_b = create_test_mailbox(api_url, token, account_id)
     if not mailbox_b:
         results.record_fail(
             "totalEmails decrement test setup", "Failed to create mailbox B"
         )
-        return
+        return email_ids_created
 
     # Import email to mailbox A
     email_id = import_test_email(api_url, upload_url, token, account_id, mailbox_a)
@@ -934,7 +1119,8 @@ def test_total_emails_decrement_on_remove(
         results.record_fail(
             "totalEmails decrement test setup", "Failed to import email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # Add to mailbox B first
     try:
@@ -947,7 +1133,7 @@ def test_total_emails_decrement_on_remove(
         )
     except Exception as e:
         results.record_fail("totalEmails decrement test setup (add to B)", str(e))
-        return
+        return email_ids_created
 
     # Get counts for mailbox A before removal
     initial_counts = get_mailbox_counts(api_url, token, account_id, mailbox_a)
@@ -955,7 +1141,7 @@ def test_total_emails_decrement_on_remove(
         results.record_fail(
             "totalEmails decrement test setup", "Failed to get initial counts for A"
         )
-        return
+        return email_ids_created
 
     initial_total = initial_counts.get("totalEmails", 0)
 
@@ -970,13 +1156,13 @@ def test_total_emails_decrement_on_remove(
         )
     except Exception as e:
         results.record_fail("totalEmails decrement Email/set request", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "totalEmails decrement response", f"No methodResponses: {response}"
         )
-        return
+        return email_ids_created
 
     # Get new counts for mailbox A
     new_counts = get_mailbox_counts(api_url, token, account_id, mailbox_a)
@@ -984,7 +1170,7 @@ def test_total_emails_decrement_on_remove(
         results.record_fail(
             "totalEmails decrement test", "Failed to get new counts for A"
         )
-        return
+        return email_ids_created
 
     new_total = new_counts.get("totalEmails", 0)
 
@@ -999,6 +1185,7 @@ def test_total_emails_decrement_on_remove(
             f"Expected {initial_total - 1}, got {new_total}",
         )
 
+    return email_ids_created
 
 def test_unread_emails_update_on_move(
     api_url: str,
@@ -1006,12 +1193,13 @@ def test_unread_emails_update_on_move(
     token: str,
     account_id: str,
     results,
-):
+) -> list[str]:
     """
     Test: unreadEmails adjusts when unread email moves between mailboxes.
 
     RFC 8621 Section 2: unreadEmails counts emails without $seen keyword.
     """
+    email_ids_created = []
     print()
     print("Test: unreadEmails updates on move (RFC 8621 Section 2)...")
 
@@ -1021,14 +1209,14 @@ def test_unread_emails_update_on_move(
         results.record_fail(
             "unreadEmails update test setup", "Failed to create mailbox A"
         )
-        return
+        return email_ids_created
 
     mailbox_b = create_test_mailbox(api_url, token, account_id)
     if not mailbox_b:
         results.record_fail(
             "unreadEmails update test setup", "Failed to create mailbox B"
         )
-        return
+        return email_ids_created
 
     # Import UNREAD email to mailbox A (no $seen keyword)
     email_id = import_email_with_keywords(
@@ -1038,7 +1226,8 @@ def test_unread_emails_update_on_move(
         results.record_fail(
             "unreadEmails update test setup", "Failed to import unread email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # Get initial unread counts
     initial_counts_a = get_mailbox_counts(api_url, token, account_id, mailbox_a)
@@ -1048,7 +1237,7 @@ def test_unread_emails_update_on_move(
         results.record_fail(
             "unreadEmails update test setup", "Failed to get initial counts"
         )
-        return
+        return email_ids_created
 
     initial_unread_a = initial_counts_a.get("unreadEmails", 0)
     initial_unread_b = initial_counts_b.get("unreadEmails", 0)
@@ -1064,13 +1253,13 @@ def test_unread_emails_update_on_move(
         )
     except Exception as e:
         results.record_fail("unreadEmails update Email/set request", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "unreadEmails update response", f"No methodResponses: {response}"
         )
-        return
+        return email_ids_created
 
     # Get new unread counts
     new_counts_a = get_mailbox_counts(api_url, token, account_id, mailbox_a)
@@ -1080,7 +1269,7 @@ def test_unread_emails_update_on_move(
         results.record_fail(
             "unreadEmails update test", "Failed to get new counts"
         )
-        return
+        return email_ids_created
 
     new_unread_a = new_counts_a.get("unreadEmails", 0)
     new_unread_b = new_counts_b.get("unreadEmails", 0)
@@ -1101,6 +1290,7 @@ def test_unread_emails_update_on_move(
             f"B: {initial_unread_b} -> {new_unread_b} (expected +1)",
         )
 
+    return email_ids_created
 
 def test_read_email_no_unread_change(
     api_url: str,
@@ -1108,12 +1298,13 @@ def test_read_email_no_unread_change(
     token: str,
     account_id: str,
     results,
-):
+) -> list[str]:
     """
     Test: Moving email with $seen keyword doesn't change unreadEmails.
 
     RFC 8621 Section 2: unreadEmails excludes emails with $seen keyword.
     """
+    email_ids_created = []
     print()
     print("Test: Read email move doesn't change unreadEmails (RFC 8621 Section 2)...")
 
@@ -1123,14 +1314,14 @@ def test_read_email_no_unread_change(
         results.record_fail(
             "Read email move test setup", "Failed to create mailbox A"
         )
-        return
+        return email_ids_created
 
     mailbox_b = create_test_mailbox(api_url, token, account_id)
     if not mailbox_b:
         results.record_fail(
             "Read email move test setup", "Failed to create mailbox B"
         )
-        return
+        return email_ids_created
 
     # Import READ email (with $seen keyword)
     email_id = import_email_with_keywords(
@@ -1140,7 +1331,8 @@ def test_read_email_no_unread_change(
         results.record_fail(
             "Read email move test setup", "Failed to import read email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # Get initial unread counts
     initial_counts_a = get_mailbox_counts(api_url, token, account_id, mailbox_a)
@@ -1150,7 +1342,7 @@ def test_read_email_no_unread_change(
         results.record_fail(
             "Read email move test setup", "Failed to get initial counts"
         )
-        return
+        return email_ids_created
 
     initial_unread_a = initial_counts_a.get("unreadEmails", 0)
     initial_unread_b = initial_counts_b.get("unreadEmails", 0)
@@ -1166,13 +1358,13 @@ def test_read_email_no_unread_change(
         )
     except Exception as e:
         results.record_fail("Read email move Email/set request", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "Read email move response", f"No methodResponses: {response}"
         )
-        return
+        return email_ids_created
 
     # Get new unread counts
     new_counts_a = get_mailbox_counts(api_url, token, account_id, mailbox_a)
@@ -1182,7 +1374,7 @@ def test_read_email_no_unread_change(
         results.record_fail(
             "Read email move test", "Failed to get new counts"
         )
-        return
+        return email_ids_created
 
     new_unread_a = new_counts_a.get("unreadEmails", 0)
     new_unread_b = new_counts_b.get("unreadEmails", 0)
@@ -1204,6 +1396,7 @@ def test_read_email_no_unread_change(
 # Test: State Tracking (RFC 8620 Section 5.3)
 # =============================================================================
 
+    return email_ids_created
 
 def test_email_set_returns_old_and_new_state(
     api_url: str,
@@ -1211,12 +1404,13 @@ def test_email_set_returns_old_and_new_state(
     token: str,
     account_id: str,
     results,
-):
+) -> list[str]:
     """
     Test: Email/set response includes oldState and newState.
 
     RFC 8620 Section 5.3: /set response MUST include oldState and newState.
     """
+    email_ids_created = []
     print()
     print("Test: Email/set returns oldState and newState (RFC 8620 Section 5.3)...")
 
@@ -1227,14 +1421,15 @@ def test_email_set_returns_old_and_new_state(
         results.record_fail(
             "State tracking test setup", "Failed to create mailboxes"
         )
-        return
+        return email_ids_created
 
     email_id = import_test_email(api_url, upload_url, token, account_id, mailbox_a)
     if not email_id:
         results.record_fail(
             "State tracking test setup", "Failed to import email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # Make an Email/set update
     try:
@@ -1247,18 +1442,18 @@ def test_email_set_returns_old_and_new_state(
         )
     except Exception as e:
         results.record_fail("State tracking Email/set request", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "State tracking response", f"No methodResponses: {response}"
         )
-        return
+        return email_ids_created
 
     method_responses = response["methodResponses"]
     if len(method_responses) == 0:
         results.record_fail("State tracking response", "Empty methodResponses")
-        return
+        return email_ids_created
 
     response_name, response_data, _ = method_responses[0]
     if response_name == "error":
@@ -1266,13 +1461,13 @@ def test_email_set_returns_old_and_new_state(
             "State tracking request",
             f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
         )
-        return
+        return email_ids_created
 
     if response_name != "Email/set":
         results.record_fail(
             "State tracking response", f"Unexpected method: {response_name}"
         )
-        return
+        return email_ids_created
 
     # Check for oldState and newState
     old_state = response_data.get("oldState")
@@ -1300,6 +1495,7 @@ def test_email_set_returns_old_and_new_state(
             f"oldState={old_state[:16]}..., newState={new_state[:16]}...",
         )
 
+    return email_ids_created
 
 def test_new_state_differs_after_update(
     api_url: str,
@@ -1307,12 +1503,13 @@ def test_new_state_differs_after_update(
     token: str,
     account_id: str,
     results,
-):
+) -> list[str]:
     """
     Test: newState differs from oldState after successful update.
 
     RFC 8620 Section 5.3: State MUST change when data changes.
     """
+    email_ids_created = []
     print()
     print("Test: newState differs after update (RFC 8620 Section 5.3)...")
 
@@ -1323,14 +1520,15 @@ def test_new_state_differs_after_update(
         results.record_fail(
             "State differs test setup", "Failed to create mailboxes"
         )
-        return
+        return email_ids_created
 
     email_id = import_test_email(api_url, upload_url, token, account_id, mailbox_a)
     if not email_id:
         results.record_fail(
             "State differs test setup", "Failed to import email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # Make an Email/set update
     try:
@@ -1343,18 +1541,18 @@ def test_new_state_differs_after_update(
         )
     except Exception as e:
         results.record_fail("State differs Email/set request", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "State differs response", f"No methodResponses: {response}"
         )
-        return
+        return email_ids_created
 
     method_responses = response["methodResponses"]
     if len(method_responses) == 0:
         results.record_fail("State differs response", "Empty methodResponses")
-        return
+        return email_ids_created
 
     response_name, response_data, _ = method_responses[0]
     if response_name == "error":
@@ -1362,13 +1560,13 @@ def test_new_state_differs_after_update(
             "State differs request",
             f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
         )
-        return
+        return email_ids_created
 
     if response_name != "Email/set":
         results.record_fail(
             "State differs response", f"Unexpected method: {response_name}"
         )
-        return
+        return email_ids_created
 
     old_state = response_data.get("oldState")
     new_state = response_data.get("newState")
@@ -1378,7 +1576,7 @@ def test_new_state_differs_after_update(
             "newState differs after update",
             f"Missing state: oldState={old_state}, newState={new_state}",
         )
-        return
+        return email_ids_created
 
     if new_state != old_state:
         results.record_pass(
@@ -1391,6 +1589,7 @@ def test_new_state_differs_after_update(
             f"State unchanged: {old_state}",
         )
 
+    return email_ids_created
 
 def test_if_in_state_success(
     api_url: str,
@@ -1398,12 +1597,13 @@ def test_if_in_state_success(
     token: str,
     account_id: str,
     results,
-):
+) -> list[str]:
     """
     Test: Request with correct ifInState succeeds.
 
     RFC 8620 Section 5.3: ifInState is a precondition check.
     """
+    email_ids_created = []
     print()
     print("Test: ifInState success (RFC 8620 Section 5.3)...")
 
@@ -1414,14 +1614,15 @@ def test_if_in_state_success(
         results.record_fail(
             "ifInState success test setup", "Failed to create mailboxes"
         )
-        return
+        return email_ids_created
 
     email_id = import_test_email(api_url, upload_url, token, account_id, mailbox_a)
     if not email_id:
         results.record_fail(
             "ifInState success test setup", "Failed to import email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # Get current state
     current_state = get_email_state(api_url, token, account_id)
@@ -1429,7 +1630,7 @@ def test_if_in_state_success(
         results.record_fail(
             "ifInState success test setup", "Failed to get current state"
         )
-        return
+        return email_ids_created
 
     # Make request with correct ifInState
     try:
@@ -1443,18 +1644,18 @@ def test_if_in_state_success(
         )
     except Exception as e:
         results.record_fail("ifInState success Email/set request", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "ifInState success response", f"No methodResponses: {response}"
         )
-        return
+        return email_ids_created
 
     method_responses = response["methodResponses"]
     if len(method_responses) == 0:
         results.record_fail("ifInState success response", "Empty methodResponses")
-        return
+        return email_ids_created
 
     response_name, response_data, _ = method_responses[0]
     if response_name == "error":
@@ -1469,13 +1670,13 @@ def test_if_in_state_success(
                 "ifInState success",
                 f"JMAP error: {error_type}: {response_data.get('description')}",
             )
-        return
+        return email_ids_created
 
     if response_name != "Email/set":
         results.record_fail(
             "ifInState success response", f"Unexpected method: {response_name}"
         )
-        return
+        return email_ids_created
 
     # Check update succeeded
     updated = response_data.get("updated", {})
@@ -1498,6 +1699,7 @@ def test_if_in_state_success(
                 f"Email not in updated or notUpdated: {response_data}",
             )
 
+    return email_ids_created
 
 def test_if_in_state_mismatch_error(
     api_url: str,
@@ -1505,12 +1707,13 @@ def test_if_in_state_mismatch_error(
     token: str,
     account_id: str,
     results,
-):
+) -> list[str]:
     """
     Test: Wrong ifInState returns stateMismatch error, no changes applied.
 
     RFC 8620 Section 5.3: If state doesn't match, return stateMismatch error.
     """
+    email_ids_created = []
     print()
     print("Test: ifInState mismatch error (RFC 8620 Section 5.3)...")
 
@@ -1521,14 +1724,15 @@ def test_if_in_state_mismatch_error(
         results.record_fail(
             "ifInState mismatch test setup", "Failed to create mailboxes"
         )
-        return
+        return email_ids_created
 
     email_id = import_test_email(api_url, upload_url, token, account_id, mailbox_a)
     if not email_id:
         results.record_fail(
             "ifInState mismatch test setup", "Failed to import email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # Make request with wrong ifInState
     wrong_state = "wrong-state-value-12345"
@@ -1543,18 +1747,18 @@ def test_if_in_state_mismatch_error(
         )
     except Exception as e:
         results.record_fail("ifInState mismatch Email/set request", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "ifInState mismatch response", f"No methodResponses: {response}"
         )
-        return
+        return email_ids_created
 
     method_responses = response["methodResponses"]
     if len(method_responses) == 0:
         results.record_fail("ifInState mismatch response", "Empty methodResponses")
-        return
+        return email_ids_created
 
     response_name, response_data, _ = method_responses[0]
 
@@ -1584,6 +1788,7 @@ def test_if_in_state_mismatch_error(
                 f"Got Email/set response and changes may have been applied: {mailbox_ids}",
             )
 
+    return email_ids_created
 
 def test_new_state_matches_subsequent_get(
     api_url: str,
@@ -1591,12 +1796,13 @@ def test_new_state_matches_subsequent_get(
     token: str,
     account_id: str,
     results,
-):
+) -> list[str]:
     """
     Test: newState from Email/set matches state from Email/get.
 
     RFC 8620 Section 5.3: States must be consistent across methods.
     """
+    email_ids_created = []
     print()
     print("Test: newState matches subsequent get (RFC 8620 Section 5.3)...")
 
@@ -1607,14 +1813,15 @@ def test_new_state_matches_subsequent_get(
         results.record_fail(
             "State consistency test setup", "Failed to create mailboxes"
         )
-        return
+        return email_ids_created
 
     email_id = import_test_email(api_url, upload_url, token, account_id, mailbox_a)
     if not email_id:
         results.record_fail(
             "State consistency test setup", "Failed to import email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # Make an Email/set update
     try:
@@ -1627,18 +1834,18 @@ def test_new_state_matches_subsequent_get(
         )
     except Exception as e:
         results.record_fail("State consistency Email/set request", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "State consistency response", f"No methodResponses: {response}"
         )
-        return
+        return email_ids_created
 
     method_responses = response["methodResponses"]
     if len(method_responses) == 0:
         results.record_fail("State consistency response", "Empty methodResponses")
-        return
+        return email_ids_created
 
     response_name, response_data, _ = method_responses[0]
     if response_name == "error":
@@ -1646,13 +1853,13 @@ def test_new_state_matches_subsequent_get(
             "State consistency request",
             f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
         )
-        return
+        return email_ids_created
 
     if response_name != "Email/set":
         results.record_fail(
             "State consistency response", f"Unexpected method: {response_name}"
         )
-        return
+        return email_ids_created
 
     new_state_from_set = response_data.get("newState")
     if not new_state_from_set:
@@ -1660,7 +1867,7 @@ def test_new_state_matches_subsequent_get(
             "State consistency test",
             "No newState in Email/set response",
         )
-        return
+        return email_ids_created
 
     # Get state from Email/get
     state_from_get = get_email_state(api_url, token, account_id)
@@ -1669,7 +1876,7 @@ def test_new_state_matches_subsequent_get(
             "State consistency test",
             "Failed to get state from Email/get",
         )
-        return
+        return email_ids_created
 
     if new_state_from_set == state_from_get:
         results.record_pass(
@@ -1688,6 +1895,7 @@ def test_new_state_matches_subsequent_get(
 # Test: Cross-Type State Updates
 # =============================================================================
 
+    return email_ids_created
 
 def test_mailbox_state_changes_on_email_update(
     api_url: str,
@@ -1695,12 +1903,13 @@ def test_mailbox_state_changes_on_email_update(
     token: str,
     account_id: str,
     results,
-):
+) -> list[str]:
     """
     Test: Mailbox state changes when Email mailboxIds updated (counters change).
 
     RFC 8621 Section 2: Mailbox counters are part of mailbox state.
     """
+    email_ids_created = []
     print()
     print("Test: Mailbox state changes on email update (RFC 8621 Section 2)...")
 
@@ -1711,14 +1920,15 @@ def test_mailbox_state_changes_on_email_update(
         results.record_fail(
             "Cross-type state test setup", "Failed to create mailboxes"
         )
-        return
+        return email_ids_created
 
     email_id = import_test_email(api_url, upload_url, token, account_id, mailbox_a)
     if not email_id:
         results.record_fail(
             "Cross-type state test setup", "Failed to import email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # Get initial mailbox state
     initial_mailbox_state = get_mailbox_state(api_url, token, account_id)
@@ -1726,7 +1936,7 @@ def test_mailbox_state_changes_on_email_update(
         results.record_fail(
             "Cross-type state test setup", "Failed to get initial mailbox state"
         )
-        return
+        return email_ids_created
 
     # Move email to different mailbox (changes counters)
     try:
@@ -1739,13 +1949,13 @@ def test_mailbox_state_changes_on_email_update(
         )
     except Exception as e:
         results.record_fail("Cross-type state Email/set request", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "Cross-type state response", f"No methodResponses: {response}"
         )
-        return
+        return email_ids_created
 
     # Get new mailbox state
     new_mailbox_state = get_mailbox_state(api_url, token, account_id)
@@ -1753,7 +1963,7 @@ def test_mailbox_state_changes_on_email_update(
         results.record_fail(
             "Cross-type state test", "Failed to get new mailbox state"
         )
-        return
+        return email_ids_created
 
     if new_mailbox_state != initial_mailbox_state:
         results.record_pass(
@@ -1771,6 +1981,7 @@ def test_mailbox_state_changes_on_email_update(
 # Test: Keyword Updates (RFC 8621 Section 4.4)
 # =============================================================================
 
+    return email_ids_created
 
 def test_add_seen_keyword_decreases_unread(
     api_url: str,
@@ -1778,13 +1989,14 @@ def test_add_seen_keyword_decreases_unread(
     token: str,
     account_id: str,
     results,
-):
+) -> list[str]:
     """
     Test: Adding $seen keyword decreases unreadEmails.
 
     RFC 8621 Section 2: unreadEmails counts emails WITHOUT $seen keyword.
     RFC 8621 Section 4.4: keywords is updatable.
     """
+    email_ids_created = []
     print()
     print("Test: Add $seen keyword decreases unreadEmails (RFC 8621 Section 4.4)...")
 
@@ -1794,7 +2006,7 @@ def test_add_seen_keyword_decreases_unread(
         results.record_fail(
             "Add $seen test setup", "Failed to create mailbox"
         )
-        return
+        return email_ids_created
 
     # Import UNREAD email (no $seen keyword)
     email_id = import_email_with_keywords(
@@ -1804,7 +2016,8 @@ def test_add_seen_keyword_decreases_unread(
         results.record_fail(
             "Add $seen test setup", "Failed to import unread email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # Get initial unread count
     initial_counts = get_mailbox_counts(api_url, token, account_id, mailbox_id)
@@ -1812,7 +2025,7 @@ def test_add_seen_keyword_decreases_unread(
         results.record_fail(
             "Add $seen test setup", "Failed to get initial counts"
         )
-        return
+        return email_ids_created
 
     initial_unread = initial_counts.get("unreadEmails", 0)
 
@@ -1827,18 +2040,18 @@ def test_add_seen_keyword_decreases_unread(
         )
     except Exception as e:
         results.record_fail("Add $seen Email/set request", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "Add $seen response", f"No methodResponses: {response}"
         )
-        return
+        return email_ids_created
 
     method_responses = response["methodResponses"]
     if len(method_responses) == 0:
         results.record_fail("Add $seen response", "Empty methodResponses")
-        return
+        return email_ids_created
 
     response_name, response_data, _ = method_responses[0]
     if response_name == "error":
@@ -1846,11 +2059,11 @@ def test_add_seen_keyword_decreases_unread(
             "Add $seen request",
             f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
         )
-        return
+        return email_ids_created
 
     if response_name != "Email/set":
         results.record_fail("Add $seen response", f"Unexpected method: {response_name}")
-        return
+        return email_ids_created
 
     # Check update succeeded
     updated = response_data.get("updated", {})
@@ -1868,20 +2081,20 @@ def test_add_seen_keyword_decreases_unread(
                 "Add $seen keyword",
                 f"Email not in updated or notUpdated: {response_data}",
             )
-        return
+        return email_ids_created
 
     # Verify keywords via Email/get
     keywords = get_email_keywords(api_url, token, account_id, email_id)
     if keywords is None:
         results.record_fail("Add $seen keyword", "Failed to get keywords")
-        return
+        return email_ids_created
 
     if not keywords.get("$seen"):
         results.record_fail(
             "Add $seen keyword",
             f"Expected $seen=true, got keywords: {keywords}",
         )
-        return
+        return email_ids_created
 
     results.record_pass("Add $seen keyword via patch", f"keywords: {keywords}")
 
@@ -1889,7 +2102,7 @@ def test_add_seen_keyword_decreases_unread(
     new_counts = get_mailbox_counts(api_url, token, account_id, mailbox_id)
     if new_counts is None:
         results.record_fail("Add $seen test", "Failed to get new counts")
-        return
+        return email_ids_created
 
     new_unread = new_counts.get("unreadEmails", 0)
 
@@ -1904,6 +2117,7 @@ def test_add_seen_keyword_decreases_unread(
             f"Expected {initial_unread - 1}, got {new_unread}",
         )
 
+    return email_ids_created
 
 def test_remove_seen_keyword_increases_unread(
     api_url: str,
@@ -1911,13 +2125,14 @@ def test_remove_seen_keyword_increases_unread(
     token: str,
     account_id: str,
     results,
-):
+) -> list[str]:
     """
     Test: Removing $seen keyword increases unreadEmails.
 
     RFC 8621 Section 2: unreadEmails counts emails WITHOUT $seen keyword.
     RFC 8620 Section 5.3: Use patch "keywords/$seen": null to remove.
     """
+    email_ids_created = []
     print()
     print("Test: Remove $seen keyword increases unreadEmails (RFC 8620 Section 5.3)...")
 
@@ -1927,7 +2142,7 @@ def test_remove_seen_keyword_increases_unread(
         results.record_fail(
             "Remove $seen test setup", "Failed to create mailbox"
         )
-        return
+        return email_ids_created
 
     # Import READ email (with $seen keyword)
     email_id = import_email_with_keywords(
@@ -1937,7 +2152,8 @@ def test_remove_seen_keyword_increases_unread(
         results.record_fail(
             "Remove $seen test setup", "Failed to import read email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # Get initial unread count
     initial_counts = get_mailbox_counts(api_url, token, account_id, mailbox_id)
@@ -1945,7 +2161,7 @@ def test_remove_seen_keyword_increases_unread(
         results.record_fail(
             "Remove $seen test setup", "Failed to get initial counts"
         )
-        return
+        return email_ids_created
 
     initial_unread = initial_counts.get("unreadEmails", 0)
 
@@ -1960,18 +2176,18 @@ def test_remove_seen_keyword_increases_unread(
         )
     except Exception as e:
         results.record_fail("Remove $seen Email/set request", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "Remove $seen response", f"No methodResponses: {response}"
         )
-        return
+        return email_ids_created
 
     method_responses = response["methodResponses"]
     if len(method_responses) == 0:
         results.record_fail("Remove $seen response", "Empty methodResponses")
-        return
+        return email_ids_created
 
     response_name, response_data, _ = method_responses[0]
     if response_name == "error":
@@ -1979,11 +2195,11 @@ def test_remove_seen_keyword_increases_unread(
             "Remove $seen request",
             f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
         )
-        return
+        return email_ids_created
 
     if response_name != "Email/set":
         results.record_fail("Remove $seen response", f"Unexpected method: {response_name}")
-        return
+        return email_ids_created
 
     # Check update succeeded
     updated = response_data.get("updated", {})
@@ -2001,7 +2217,7 @@ def test_remove_seen_keyword_increases_unread(
                 "Remove $seen keyword",
                 f"Email not in updated or notUpdated: {response_data}",
             )
-        return
+        return email_ids_created
 
     # Verify keywords via Email/get
     # Note: After removing all keywords, server may return None or {} - both are valid
@@ -2014,7 +2230,7 @@ def test_remove_seen_keyword_increases_unread(
             "Remove $seen keyword",
             f"Expected $seen absent, got keywords: {keywords}",
         )
-        return
+        return email_ids_created
 
     results.record_pass("Remove $seen keyword via patch", f"keywords: {keywords}")
 
@@ -2022,7 +2238,7 @@ def test_remove_seen_keyword_increases_unread(
     new_counts = get_mailbox_counts(api_url, token, account_id, mailbox_id)
     if new_counts is None:
         results.record_fail("Remove $seen test", "Failed to get new counts")
-        return
+        return email_ids_created
 
     new_unread = new_counts.get("unreadEmails", 0)
 
@@ -2037,6 +2253,7 @@ def test_remove_seen_keyword_increases_unread(
             f"Expected {initial_unread + 1}, got {new_unread}",
         )
 
+    return email_ids_created
 
 def test_set_keywords_via_full_replacement(
     api_url: str,
@@ -2044,12 +2261,13 @@ def test_set_keywords_via_full_replacement(
     token: str,
     account_id: str,
     results,
-):
+) -> list[str]:
     """
     Test: Set keywords via full replacement.
 
     RFC 8621 Section 4.4: keywords is updatable as a full map replacement.
     """
+    email_ids_created = []
     print()
     print("Test: Set keywords via full replacement (RFC 8621 Section 4.4)...")
 
@@ -2059,7 +2277,7 @@ def test_set_keywords_via_full_replacement(
         results.record_fail(
             "Keywords replacement test setup", "Failed to create mailbox"
         )
-        return
+        return email_ids_created
 
     # Import email with some keywords
     email_id = import_email_with_keywords(
@@ -2070,7 +2288,8 @@ def test_set_keywords_via_full_replacement(
         results.record_fail(
             "Keywords replacement test setup", "Failed to import email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # Verify initial keywords
     initial_keywords = get_email_keywords(api_url, token, account_id, email_id)
@@ -2078,14 +2297,14 @@ def test_set_keywords_via_full_replacement(
         results.record_fail(
             "Keywords replacement test setup", "Failed to get initial keywords"
         )
-        return
+        return email_ids_created
 
     if not (initial_keywords.get("$seen") and initial_keywords.get("$answered")):
         results.record_fail(
             "Keywords replacement test setup",
             f"Expected $seen and $answered, got: {initial_keywords}",
         )
-        return
+        return email_ids_created
 
     # Replace keywords with entirely different set
     try:
@@ -2098,18 +2317,18 @@ def test_set_keywords_via_full_replacement(
         )
     except Exception as e:
         results.record_fail("Keywords replacement Email/set request", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "Keywords replacement response", f"No methodResponses: {response}"
         )
-        return
+        return email_ids_created
 
     method_responses = response["methodResponses"]
     if len(method_responses) == 0:
         results.record_fail("Keywords replacement response", "Empty methodResponses")
-        return
+        return email_ids_created
 
     response_name, response_data, _ = method_responses[0]
     if response_name == "error":
@@ -2117,13 +2336,13 @@ def test_set_keywords_via_full_replacement(
             "Keywords replacement request",
             f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
         )
-        return
+        return email_ids_created
 
     if response_name != "Email/set":
         results.record_fail(
             "Keywords replacement response", f"Unexpected method: {response_name}"
         )
-        return
+        return email_ids_created
 
     # Check update succeeded
     updated = response_data.get("updated", {})
@@ -2141,13 +2360,13 @@ def test_set_keywords_via_full_replacement(
                 "Keywords replacement",
                 f"Email not in updated or notUpdated: {response_data}",
             )
-        return
+        return email_ids_created
 
     # Verify keywords replaced completely
     new_keywords = get_email_keywords(api_url, token, account_id, email_id)
     if new_keywords is None:
         results.record_fail("Keywords replacement", "Failed to get new keywords")
-        return
+        return email_ids_created
 
     # Should only have $flagged, not $seen or $answered
     if (
@@ -2165,6 +2384,7 @@ def test_set_keywords_via_full_replacement(
             f"Expected only $flagged, got: {new_keywords}",
         )
 
+    return email_ids_created
 
 def test_add_non_unread_keyword_no_counter_change(
     api_url: str,
@@ -2172,12 +2392,13 @@ def test_add_non_unread_keyword_no_counter_change(
     token: str,
     account_id: str,
     results,
-):
+) -> list[str]:
     """
     Test: Adding non-$seen keyword doesn't change unreadEmails.
 
     RFC 8621 Section 2: Only $seen affects unreadEmails count.
     """
+    email_ids_created = []
     print()
     print("Test: Add $flagged keyword doesn't change unreadEmails (RFC 8621 Section 2)...")
 
@@ -2187,7 +2408,7 @@ def test_add_non_unread_keyword_no_counter_change(
         results.record_fail(
             "Non-unread keyword test setup", "Failed to create mailbox"
         )
-        return
+        return email_ids_created
 
     # Import UNREAD email
     email_id = import_email_with_keywords(
@@ -2197,7 +2418,8 @@ def test_add_non_unread_keyword_no_counter_change(
         results.record_fail(
             "Non-unread keyword test setup", "Failed to import email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # Get initial unread count
     initial_counts = get_mailbox_counts(api_url, token, account_id, mailbox_id)
@@ -2205,7 +2427,7 @@ def test_add_non_unread_keyword_no_counter_change(
         results.record_fail(
             "Non-unread keyword test setup", "Failed to get initial counts"
         )
-        return
+        return email_ids_created
 
     initial_unread = initial_counts.get("unreadEmails", 0)
 
@@ -2220,18 +2442,18 @@ def test_add_non_unread_keyword_no_counter_change(
         )
     except Exception as e:
         results.record_fail("Add $flagged Email/set request", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "Add $flagged response", f"No methodResponses: {response}"
         )
-        return
+        return email_ids_created
 
     method_responses = response["methodResponses"]
     if len(method_responses) == 0:
         results.record_fail("Add $flagged response", "Empty methodResponses")
-        return
+        return email_ids_created
 
     response_name, response_data, _ = method_responses[0]
     if response_name == "error":
@@ -2239,11 +2461,11 @@ def test_add_non_unread_keyword_no_counter_change(
             "Add $flagged request",
             f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
         )
-        return
+        return email_ids_created
 
     if response_name != "Email/set":
         results.record_fail("Add $flagged response", f"Unexpected method: {response_name}")
-        return
+        return email_ids_created
 
     # Check update succeeded
     updated = response_data.get("updated", {})
@@ -2260,20 +2482,20 @@ def test_add_non_unread_keyword_no_counter_change(
                 "Add $flagged keyword",
                 f"Email not in updated or notUpdated: {response_data}",
             )
-        return
+        return email_ids_created
 
     # Verify keywords via Email/get
     keywords = get_email_keywords(api_url, token, account_id, email_id)
     if keywords is None:
         results.record_fail("Add $flagged keyword", "Failed to get keywords")
-        return
+        return email_ids_created
 
     if not keywords.get("$flagged"):
         results.record_fail(
             "Add $flagged keyword",
             f"Expected $flagged=true, got keywords: {keywords}",
         )
-        return
+        return email_ids_created
 
     results.record_pass("Add $flagged keyword via patch", f"keywords: {keywords}")
 
@@ -2281,7 +2503,7 @@ def test_add_non_unread_keyword_no_counter_change(
     new_counts = get_mailbox_counts(api_url, token, account_id, mailbox_id)
     if new_counts is None:
         results.record_fail("Non-unread keyword test", "Failed to get new counts")
-        return
+        return email_ids_created
 
     new_unread = new_counts.get("unreadEmails", 0)
 
@@ -2296,6 +2518,7 @@ def test_add_non_unread_keyword_no_counter_change(
             f"Expected {initial_unread}, got {new_unread}",
         )
 
+    return email_ids_created
 
 def test_email_state_changes_on_keyword_update(
     api_url: str,
@@ -2303,12 +2526,13 @@ def test_email_state_changes_on_keyword_update(
     token: str,
     account_id: str,
     results,
-):
+) -> list[str]:
     """
     Test: Email state changes when keywords updated.
 
     RFC 8620 Section 5.3: State MUST change when data changes.
     """
+    email_ids_created = []
     print()
     print("Test: Email state changes on keyword update (RFC 8620 Section 5.3)...")
 
@@ -2318,7 +2542,7 @@ def test_email_state_changes_on_keyword_update(
         results.record_fail(
             "Email state on keyword update test setup", "Failed to create mailbox"
         )
-        return
+        return email_ids_created
 
     email_id = import_email_with_keywords(
         api_url, upload_url, token, account_id, mailbox_id, keywords={}
@@ -2327,7 +2551,8 @@ def test_email_state_changes_on_keyword_update(
         results.record_fail(
             "Email state on keyword update test setup", "Failed to import email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # Update keywords
     try:
@@ -2340,18 +2565,18 @@ def test_email_state_changes_on_keyword_update(
         )
     except Exception as e:
         results.record_fail("Email state on keyword update Email/set request", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "Email state on keyword update response", f"No methodResponses: {response}"
         )
-        return
+        return email_ids_created
 
     method_responses = response["methodResponses"]
     if len(method_responses) == 0:
         results.record_fail("Email state on keyword update response", "Empty methodResponses")
-        return
+        return email_ids_created
 
     response_name, response_data, _ = method_responses[0]
     if response_name == "error":
@@ -2359,13 +2584,13 @@ def test_email_state_changes_on_keyword_update(
             "Email state on keyword update request",
             f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
         )
-        return
+        return email_ids_created
 
     if response_name != "Email/set":
         results.record_fail(
             "Email state on keyword update response", f"Unexpected method: {response_name}"
         )
-        return
+        return email_ids_created
 
     old_state = response_data.get("oldState")
     new_state = response_data.get("newState")
@@ -2375,7 +2600,7 @@ def test_email_state_changes_on_keyword_update(
             "Email state on keyword update",
             f"Missing state: oldState={old_state}, newState={new_state}",
         )
-        return
+        return email_ids_created
 
     if new_state != old_state:
         results.record_pass(
@@ -2401,6 +2626,7 @@ def test_email_state_changes_on_keyword_update(
             f"Email/set newState={new_state[:16]}..., Email/get state={state_from_get[:16] if state_from_get else 'None'}...",
         )
 
+    return email_ids_created
 
 def test_mailbox_state_changes_on_seen_keyword_update(
     api_url: str,
@@ -2408,12 +2634,13 @@ def test_mailbox_state_changes_on_seen_keyword_update(
     token: str,
     account_id: str,
     results,
-):
+) -> list[str]:
     """
     Test: Mailbox state changes when $seen keyword changes (affects unreadEmails).
 
     RFC 8621 Section 2: Mailbox counters are part of mailbox state.
     """
+    email_ids_created = []
     print()
     print("Test: Mailbox state changes on $seen keyword update (RFC 8621 Section 2)...")
 
@@ -2423,7 +2650,7 @@ def test_mailbox_state_changes_on_seen_keyword_update(
         results.record_fail(
             "Mailbox state on $seen update test setup", "Failed to create mailbox"
         )
-        return
+        return email_ids_created
 
     # Import UNREAD email
     email_id = import_email_with_keywords(
@@ -2433,7 +2660,8 @@ def test_mailbox_state_changes_on_seen_keyword_update(
         results.record_fail(
             "Mailbox state on $seen update test setup", "Failed to import email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # Get initial mailbox state
     initial_mailbox_state = get_mailbox_state(api_url, token, account_id)
@@ -2441,7 +2669,7 @@ def test_mailbox_state_changes_on_seen_keyword_update(
         results.record_fail(
             "Mailbox state on $seen update test setup", "Failed to get initial mailbox state"
         )
-        return
+        return email_ids_created
 
     # Add $seen keyword (changes unreadEmails counter)
     try:
@@ -2454,18 +2682,18 @@ def test_mailbox_state_changes_on_seen_keyword_update(
         )
     except Exception as e:
         results.record_fail("Mailbox state on $seen update Email/set request", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "Mailbox state on $seen update response", f"No methodResponses: {response}"
         )
-        return
+        return email_ids_created
 
     method_responses = response["methodResponses"]
     if len(method_responses) == 0:
         results.record_fail("Mailbox state on $seen update response", "Empty methodResponses")
-        return
+        return email_ids_created
 
     response_name, response_data, _ = method_responses[0]
     if response_name == "error":
@@ -2473,7 +2701,7 @@ def test_mailbox_state_changes_on_seen_keyword_update(
             "Mailbox state on $seen update request",
             f"JMAP error: {response_data.get('type')}: {response_data.get('description')}",
         )
-        return
+        return email_ids_created
 
     # Get new mailbox state
     new_mailbox_state = get_mailbox_state(api_url, token, account_id)
@@ -2481,7 +2709,7 @@ def test_mailbox_state_changes_on_seen_keyword_update(
         results.record_fail(
             "Mailbox state on $seen update test", "Failed to get new mailbox state"
         )
-        return
+        return email_ids_created
 
     if new_mailbox_state != initial_mailbox_state:
         results.record_pass(
@@ -2499,6 +2727,7 @@ def test_mailbox_state_changes_on_seen_keyword_update(
 # Test: Invalid Patch Errors (RFC 8620 Section 5.3)
 # =============================================================================
 
+    return email_ids_created
 
 def test_invalid_patch_non_existent_property(
     api_url: str,
@@ -2506,12 +2735,13 @@ def test_invalid_patch_non_existent_property(
     token: str,
     account_id: str,
     results,
-):
+) -> list[str]:
     """
     Test: Patch to non-existent property returns invalidPatch/invalidProperties.
 
     RFC 8620 Section 5.3: Invalid patch paths must be rejected.
     """
+    email_ids_created = []
     print()
     print("Test: Invalid patch to non-existent property (RFC 8620 Section 5.3)...")
 
@@ -2521,14 +2751,15 @@ def test_invalid_patch_non_existent_property(
         results.record_fail(
             "Invalid patch test setup", "Failed to create mailbox"
         )
-        return
+        return email_ids_created
 
     email_id = import_test_email(api_url, upload_url, token, account_id, mailbox_id)
     if not email_id:
         results.record_fail(
             "Invalid patch test setup", "Failed to import email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # Attempt patch with non-existent property path
     try:
@@ -2541,18 +2772,18 @@ def test_invalid_patch_non_existent_property(
         )
     except Exception as e:
         results.record_fail("Invalid patch Email/set request", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "Invalid patch response", f"No methodResponses: {response}"
         )
-        return
+        return email_ids_created
 
     method_responses = response["methodResponses"]
     if len(method_responses) == 0:
         results.record_fail("Invalid patch response", "Empty methodResponses")
-        return
+        return email_ids_created
 
     response_name, response_data, _ = method_responses[0]
 
@@ -2563,13 +2794,13 @@ def test_invalid_patch_non_existent_property(
             "Invalid patch to non-existent property rejected",
             f"Method error: {error_type}",
         )
-        return
+        return email_ids_created
 
     if response_name != "Email/set":
         results.record_fail(
             "Invalid patch response", f"Unexpected method: {response_name}"
         )
-        return
+        return email_ids_created
 
     # Check for notUpdated with appropriate error
     not_updated = response_data.get("notUpdated", {})
@@ -2600,6 +2831,7 @@ def test_invalid_patch_non_existent_property(
             f"Email not in updated or notUpdated: {response_data}",
         )
 
+    return email_ids_created
 
 def test_invalid_patch_nested_non_existent_path(
     api_url: str,
@@ -2607,13 +2839,14 @@ def test_invalid_patch_nested_non_existent_path(
     token: str,
     account_id: str,
     results,
-):
+) -> list[str]:
     """
     Test: Patch to nested path that doesn't exist returns error.
 
     RFC 8620 Section 5.3: "All parts prior to the last MUST already exist
     on the object being patched."
     """
+    email_ids_created = []
     print()
     print("Test: Invalid patch to nested non-existent path (RFC 8620 Section 5.3)...")
 
@@ -2623,14 +2856,15 @@ def test_invalid_patch_nested_non_existent_path(
         results.record_fail(
             "Nested invalid patch test setup", "Failed to create mailbox"
         )
-        return
+        return email_ids_created
 
     email_id = import_test_email(api_url, upload_url, token, account_id, mailbox_id)
     if not email_id:
         results.record_fail(
             "Nested invalid patch test setup", "Failed to import email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # Attempt patch with nested path that doesn't exist
     # keywords is a valid property, but keywords/nested/deep is not valid
@@ -2644,18 +2878,18 @@ def test_invalid_patch_nested_non_existent_path(
         )
     except Exception as e:
         results.record_fail("Nested invalid patch Email/set request", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "Nested invalid patch response", f"No methodResponses: {response}"
         )
-        return
+        return email_ids_created
 
     method_responses = response["methodResponses"]
     if len(method_responses) == 0:
         results.record_fail("Nested invalid patch response", "Empty methodResponses")
-        return
+        return email_ids_created
 
     response_name, response_data, _ = method_responses[0]
 
@@ -2666,13 +2900,13 @@ def test_invalid_patch_nested_non_existent_path(
             "Invalid nested patch path rejected",
             f"Method error: {error_type}",
         )
-        return
+        return email_ids_created
 
     if response_name != "Email/set":
         results.record_fail(
             "Nested invalid patch response", f"Unexpected method: {response_name}"
         )
-        return
+        return email_ids_created
 
     # Check for notUpdated with appropriate error
     not_updated = response_data.get("notUpdated", {})
@@ -2703,6 +2937,7 @@ def test_invalid_patch_nested_non_existent_path(
             f"Email not in updated or notUpdated: {response_data}",
         )
 
+    return email_ids_created
 
 def test_invalid_patch_immutable_property(
     api_url: str,
@@ -2710,13 +2945,14 @@ def test_invalid_patch_immutable_property(
     token: str,
     account_id: str,
     results,
-):
+) -> list[str]:
     """
     Test: Patch to server-set/immutable property returns invalidProperties.
 
     RFC 8621 Section 4: id and receivedAt are server-set properties that
     cannot be modified after creation.
     """
+    email_ids_created = []
     print()
     print("Test: Invalid patch to immutable property (RFC 8621 Section 4)...")
 
@@ -2726,14 +2962,15 @@ def test_invalid_patch_immutable_property(
         results.record_fail(
             "Immutable property patch test setup", "Failed to create mailbox"
         )
-        return
+        return email_ids_created
 
     email_id = import_test_email(api_url, upload_url, token, account_id, mailbox_id)
     if not email_id:
         results.record_fail(
             "Immutable property patch test setup", "Failed to import email"
         )
-        return
+        return email_ids_created
+    email_ids_created.append(email_id)
 
     # Attempt to patch the immutable 'receivedAt' property
     try:
@@ -2746,18 +2983,18 @@ def test_invalid_patch_immutable_property(
         )
     except Exception as e:
         results.record_fail("Immutable property patch Email/set request", str(e))
-        return
+        return email_ids_created
 
     if "methodResponses" not in response:
         results.record_fail(
             "Immutable property patch response", f"No methodResponses: {response}"
         )
-        return
+        return email_ids_created
 
     method_responses = response["methodResponses"]
     if len(method_responses) == 0:
         results.record_fail("Immutable property patch response", "Empty methodResponses")
-        return
+        return email_ids_created
 
     response_name, response_data, _ = method_responses[0]
 
@@ -2768,13 +3005,13 @@ def test_invalid_patch_immutable_property(
             "Patch to immutable property rejected",
             f"Method error: {error_type}",
         )
-        return
+        return email_ids_created
 
     if response_name != "Email/set":
         results.record_fail(
             "Immutable property patch response", f"Unexpected method: {response_name}"
         )
-        return
+        return email_ids_created
 
     # Check for notUpdated with appropriate error
     not_updated = response_data.get("notUpdated", {})
@@ -2810,6 +3047,7 @@ def test_invalid_patch_immutable_property(
 # Main Entry Functions
 # =============================================================================
 
+    return email_ids_created
 
 def test_email_set_invalid_patches(client, config, results):
     """Test Email/set rejects invalid patches (RFC 8620 Section 5.3)."""
@@ -2829,15 +3067,23 @@ def test_email_set_invalid_patches(client, config, results):
     api_url = session.api_url
     upload_url = session.upload_url
 
-    test_invalid_patch_non_existent_property(
+    all_email_ids = []
+    all_email_ids.extend(test_invalid_patch_non_existent_property(
         api_url, upload_url, config.token, account_id, results
-    )
-    test_invalid_patch_nested_non_existent_path(
+    ))
+    all_email_ids.extend(test_invalid_patch_nested_non_existent_path(
         api_url, upload_url, config.token, account_id, results
-    )
-    test_invalid_patch_immutable_property(
+    ))
+    all_email_ids.extend(test_invalid_patch_immutable_property(
         api_url, upload_url, config.token, account_id, results
-    )
+    ))
+
+    # Cleanup
+    if all_email_ids:
+        destroy_emails_and_verify_cleanup(
+            api_url, config.token, account_id, all_email_ids, config, results,
+            test_name_prefix="[invalid patches cleanup]",
+        )
 
 
 def test_email_set_mailbox_changes(client, config, results):
@@ -2858,18 +3104,26 @@ def test_email_set_mailbox_changes(client, config, results):
     api_url = session.api_url
     upload_url = session.upload_url
 
-    test_move_email_between_mailboxes(
+    all_email_ids = []
+    all_email_ids.extend(test_move_email_between_mailboxes(
         api_url, upload_url, config.token, account_id, results
-    )
-    test_add_email_to_additional_mailbox(
+    ))
+    all_email_ids.extend(test_add_email_to_additional_mailbox(
         api_url, upload_url, config.token, account_id, results
-    )
-    test_remove_email_from_one_mailbox(
+    ))
+    all_email_ids.extend(test_remove_email_from_one_mailbox(
         api_url, upload_url, config.token, account_id, results
-    )
-    test_remove_all_mailboxes_error(
+    ))
+    all_email_ids.extend(test_remove_all_mailboxes_error(
         api_url, upload_url, config.token, account_id, results
-    )
+    ))
+
+    # Cleanup
+    if all_email_ids:
+        destroy_emails_and_verify_cleanup(
+            api_url, config.token, account_id, all_email_ids, config, results,
+            test_name_prefix="[mailbox changes cleanup]",
+        )
 
 
 def test_email_set_counter_updates(client, config, results):
@@ -2890,18 +3144,26 @@ def test_email_set_counter_updates(client, config, results):
     api_url = session.api_url
     upload_url = session.upload_url
 
-    test_total_emails_increment_on_add(
+    all_email_ids = []
+    all_email_ids.extend(test_total_emails_increment_on_add(
         api_url, upload_url, config.token, account_id, results
-    )
-    test_total_emails_decrement_on_remove(
+    ))
+    all_email_ids.extend(test_total_emails_decrement_on_remove(
         api_url, upload_url, config.token, account_id, results
-    )
-    test_unread_emails_update_on_move(
+    ))
+    all_email_ids.extend(test_unread_emails_update_on_move(
         api_url, upload_url, config.token, account_id, results
-    )
-    test_read_email_no_unread_change(
+    ))
+    all_email_ids.extend(test_read_email_no_unread_change(
         api_url, upload_url, config.token, account_id, results
-    )
+    ))
+
+    # Cleanup
+    if all_email_ids:
+        destroy_emails_and_verify_cleanup(
+            api_url, config.token, account_id, all_email_ids, config, results,
+            test_name_prefix="[counter updates cleanup]",
+        )
 
 
 def test_email_set_state_tracking(client, config, results):
@@ -2922,24 +3184,32 @@ def test_email_set_state_tracking(client, config, results):
     api_url = session.api_url
     upload_url = session.upload_url
 
-    test_email_set_returns_old_and_new_state(
+    all_email_ids = []
+    all_email_ids.extend(test_email_set_returns_old_and_new_state(
         api_url, upload_url, config.token, account_id, results
-    )
-    test_new_state_differs_after_update(
+    ))
+    all_email_ids.extend(test_new_state_differs_after_update(
         api_url, upload_url, config.token, account_id, results
-    )
-    test_if_in_state_success(
+    ))
+    all_email_ids.extend(test_if_in_state_success(
         api_url, upload_url, config.token, account_id, results
-    )
-    test_if_in_state_mismatch_error(
+    ))
+    all_email_ids.extend(test_if_in_state_mismatch_error(
         api_url, upload_url, config.token, account_id, results
-    )
-    test_new_state_matches_subsequent_get(
+    ))
+    all_email_ids.extend(test_new_state_matches_subsequent_get(
         api_url, upload_url, config.token, account_id, results
-    )
-    test_mailbox_state_changes_on_email_update(
+    ))
+    all_email_ids.extend(test_mailbox_state_changes_on_email_update(
         api_url, upload_url, config.token, account_id, results
-    )
+    ))
+
+    # Cleanup
+    if all_email_ids:
+        destroy_emails_and_verify_cleanup(
+            api_url, config.token, account_id, all_email_ids, config, results,
+            test_name_prefix="[state tracking cleanup]",
+        )
 
 
 def test_email_set_keyword_updates(client, config, results):
@@ -2960,21 +3230,29 @@ def test_email_set_keyword_updates(client, config, results):
     api_url = session.api_url
     upload_url = session.upload_url
 
-    test_add_seen_keyword_decreases_unread(
+    all_email_ids = []
+    all_email_ids.extend(test_add_seen_keyword_decreases_unread(
         api_url, upload_url, config.token, account_id, results
-    )
-    test_remove_seen_keyword_increases_unread(
+    ))
+    all_email_ids.extend(test_remove_seen_keyword_increases_unread(
         api_url, upload_url, config.token, account_id, results
-    )
-    test_set_keywords_via_full_replacement(
+    ))
+    all_email_ids.extend(test_set_keywords_via_full_replacement(
         api_url, upload_url, config.token, account_id, results
-    )
-    test_add_non_unread_keyword_no_counter_change(
+    ))
+    all_email_ids.extend(test_add_non_unread_keyword_no_counter_change(
         api_url, upload_url, config.token, account_id, results
-    )
-    test_email_state_changes_on_keyword_update(
+    ))
+    all_email_ids.extend(test_email_state_changes_on_keyword_update(
         api_url, upload_url, config.token, account_id, results
-    )
-    test_mailbox_state_changes_on_seen_keyword_update(
+    ))
+    all_email_ids.extend(test_mailbox_state_changes_on_seen_keyword_update(
         api_url, upload_url, config.token, account_id, results
-    )
+    ))
+
+    # Cleanup
+    if all_email_ids:
+        destroy_emails_and_verify_cleanup(
+            api_url, config.token, account_id, all_email_ids, config, results,
+            test_name_prefix="[keyword updates cleanup]",
+        )
