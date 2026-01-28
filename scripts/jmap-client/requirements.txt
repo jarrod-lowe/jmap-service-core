@@ -2,3 +2,5 @@ jmapc
 requests
 pyyaml
 boto3
+pytest
+pytest-xdist

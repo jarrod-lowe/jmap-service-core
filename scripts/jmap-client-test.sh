@@ -166,8 +166,9 @@ run_python_test() {
     export DYNAMODB_TABLE="$DYNAMODB_TABLE"
     export AWS_REGION="$REGION"
 
-    # Run the Python test script
-    "$VENV_DIR/bin/python" "$SCRIPT_DIR/jmap-client/test_jmap.py"
+    # Activate venv and run pytest
+    source "$VENV_DIR/bin/activate"
+    python -m pytest "$SCRIPT_DIR/jmap-client/" -v ${PYTEST_ARGS:-} "$@"
 }
 
 # Main

@@ -1,715 +1,24 @@
-#!/usr/bin/env python3
 """
 JMAP Protocol Compliance Tests using jmapc
 
 Uses the independent jmapc Python JMAP client to validate that our server
 implementation is compliant with RFC 8620 (JMAP Core).
-
-Environment variables:
-    JMAP_HOST: JMAP hostname (e.g., jmap.example.com)
-    JMAP_API_TOKEN: Bearer token for authentication
-
-Exit codes:
-    0: All tests passed
-    1: One or more tests failed
 """
 
-import os
-import sys
+import time
 
 import boto3
+import pytest
 import requests
-from jmapc import Client, Comparator
-from jmapc.methods import CoreEcho, EmailGet, EmailQuery
+from jmapc import Comparator
+from jmapc.methods import CoreEcho, EmailQuery
 
-from test_changes import test_email_changes, test_mailbox_changes, test_thread_changes
-from test_email import setup_query_test_data, test_email_import_and_get
-from test_email_headers import test_header_properties
-from test_email_set import (
-    destroy_emails_and_verify_cleanup,
-    test_email_set_mailbox_changes,
-    test_email_set_counter_updates,
-    test_email_set_state_tracking,
-    test_email_set_keyword_updates,
-    test_email_set_invalid_patches,
-)
-from test_thread import test_thread_operations
-from test_result_references import test_result_references
+from helpers import make_jmap_request
 
 
-class Colors:
-    """ANSI color codes for terminal output."""
-
-    GREEN = "\033[0;32m"
-    RED = "\033[0;31m"
-    YELLOW = "\033[1;33m"
-    NC = "\033[0m"  # No Color
-
-
-class TestResult:
-    """Track test results."""
-
-    def __init__(self):
-        self.passed = 0
-        self.failed = 0
-        self.tests = []
-
-    def record_pass(self, name: str, detail: str = ""):
-        self.passed += 1
-        self.tests.append((name, True, detail))
-        print(f"{Colors.GREEN}PASS{Colors.NC}: {name}")
-        if detail:
-            print(f"      {detail}")
-
-    def record_fail(self, name: str, reason: str = ""):
-        self.failed += 1
-        self.tests.append((name, False, reason))
-        print(f"{Colors.RED}FAIL{Colors.NC}: {name}")
-        if reason:
-            print(f"      {reason}")
-
-    @property
-    def total(self) -> int:
-        return self.passed + self.failed
-
-    @property
-    def all_passed(self) -> bool:
-        return self.failed == 0
-
-
-class Config:
-    """Configuration container for test settings."""
-
-    def __init__(self, host: str, token: str, blob_bucket: str | None, dynamodb_table: str | None, region: str):
-        self.host = host
-        self.token = token
-        self.blob_bucket = blob_bucket
-        self.dynamodb_table = dynamodb_table
-        self.region = region
-
-
-def get_config() -> Config:
-    """Get configuration from environment variables."""
-    host = os.environ.get("JMAP_HOST")
-    token = os.environ.get("JMAP_API_TOKEN")
-    blob_bucket = os.environ.get("BLOB_BUCKET")
-    dynamodb_table = os.environ.get("DYNAMODB_TABLE")
-    region = os.environ.get("AWS_REGION", "ap-southeast-2")
-
-    if not host:
-        print(f"{Colors.RED}ERROR: JMAP_HOST environment variable not set{Colors.NC}")
-        sys.exit(1)
-
-    if not token:
-        print(f"{Colors.RED}ERROR: JMAP_API_TOKEN environment variable not set{Colors.NC}")
-        sys.exit(1)
-
-    return Config(host, token, blob_bucket, dynamodb_table, region)
-
-
-def test_client_connection(host: str, token: str, results: TestResult) -> Client | None:
-    """
-    Test 1: Session Discovery via jmapc Client
-
-    Create a jmapc Client and let it automatically discover and parse the session.
-    This validates that our server's session response is compatible with an
-    independent JMAP client implementation.
-    """
-    print()
-    print("Testing Session Discovery (jmapc Client)...")
-
-    try:
-        client = Client.create_with_api_token(host=host, api_token=token)
-        session = client.jmap_session  # This triggers session fetch
-        results.record_pass("Client connection successful", f"API URL: {session.api_url}")
-    except Exception as e:
-        results.record_fail("Client connection", str(e))
-        return None
-
-    # Validate session properties are accessible
-    # jmapc parses capabilities into structured objects
-    try:
-        if session.capabilities and session.capabilities.core:
-            core = session.capabilities.core
-            results.record_pass(
-                "Session has urn:ietf:params:jmap:core capability",
-                f"maxSizeUpload: {core.max_size_upload}",
-            )
-        else:
-            results.record_fail(
-                "Session has urn:ietf:params:jmap:core capability",
-                "capabilities.core is None",
-            )
-    except Exception as e:
-        results.record_fail("Session capabilities accessible", str(e))
-
-    # jmapc stores account IDs in primary_accounts
-    try:
-        account_id = client.account_id
-        if account_id:
-            results.record_pass("Session has at least one account", f"Account ID: {account_id}")
-        else:
-            results.record_fail("Session has at least one account", "No account ID found")
-    except Exception as e:
-        results.record_fail("Session accounts accessible", str(e))
-
-    try:
-        if session.primary_accounts:
-            results.record_pass(
-                "Session has primary_accounts",
-                f"core={session.primary_accounts.core}, mail={session.primary_accounts.mail}",
-            )
-        else:
-            results.record_fail(
-                "Session has primary_accounts", "primary_accounts is None"
-            )
-    except Exception as e:
-        results.record_fail("Session primary_accounts accessible", str(e))
-
-    try:
-        if session.api_url:
-            results.record_pass("Session has api_url", session.api_url)
-        else:
-            results.record_fail("Session has api_url", "api_url is None or empty")
-    except Exception as e:
-        results.record_fail("Session api_url accessible", str(e))
-
-    try:
-        if session.state:
-            results.record_pass("Session has state")
-        else:
-            results.record_fail("Session has state", "state is None or empty")
-    except Exception as e:
-        results.record_fail("Session state accessible", str(e))
-
-    return client
-
-
-def test_core_echo(client: Client, results: TestResult):
-    """
-    Test 2: Core/echo Method Call
-
-    Per RFC 8620 Section 3.5, Core/echo echoes back its arguments unchanged.
-    Uses jmapc's CoreEcho method to test authenticated connection to the JMAP API.
-    """
-    print()
-    print("Testing Core/echo (via jmapc)...")
-
-    test_data = {"hello": True, "count": 42, "nested": {"key": "value", "array": [1, 2, 3]}}
-
-    try:
-        response = client.request(CoreEcho(data=test_data))
-        results.record_pass("Core/echo request successful")
-
-        # Check the response data matches
-        response_data = getattr(response, "data", None)
-        if response_data == test_data:
-            results.record_pass("Core/echo echoed arguments exactly")
-        else:
-            actual_data = getattr(response, "data", response)
-            results.record_fail(
-                "Core/echo echoed arguments exactly",
-                f"Expected: {test_data}\nGot: {actual_data}",
-            )
-    except Exception as e:
-        results.record_fail("Core/echo request", str(e))
-
-
-def test_email_query(client: Client, results: TestResult):
-    """
-    Test 3: Email/query Method Call
-
-    Make a basic Email/query request using jmapc to validate mail method handling.
-    Note: jmapc Client automatically uses client.account_id for all requests.
-    """
-    print()
-    print("Testing Email/query (via jmapc)...")
-
-    try:
-        response = client.request(EmailQuery())
-        results.record_pass("Email/query request successful")
-
-        # Check if response is an error (server may not have Email implemented)
-        error_type = getattr(response, "type", None)
-        error_desc = getattr(response, "description", None)
-        if error_type and error_desc:
-            # This is a JMAP error response
-            results.record_pass(
-                "Email/query returned JMAP error",
-                f"type={error_type}, description={error_desc}",
-            )
-        else:
-            # Check the response has expected fields for successful query
-            ids = getattr(response, "ids", None)
-            if ids is not None:
-                results.record_pass(
-                    "Email/query response has ids", f"Count: {len(ids)}"
-                )
-            else:
-                results.record_fail(
-                    "Email/query response has ids", "No ids field in response"
-                )
-
-            if hasattr(response, "query_state"):
-                results.record_pass("Email/query response has query_state")
-            else:
-                results.record_fail(
-                    "Email/query response has query_state", "No query_state field"
-                )
-
-    except Exception as e:
-        results.record_fail("Email/query request", str(e))
-
-
-def test_blob_upload(client: Client, token: str, results: TestResult):
-    """
-    Test 4: Blob Upload (RFC 8620 Section 6.1)
-
-    Validate session has uploadUrl and blob upload returns compliant response.
-    Note: jmapc doesn't support raw blob upload, so we use raw HTTP requests.
-    """
-    print()
-    print("Testing Blob Upload (raw HTTP - jmapc doesn't support this)...")
-
-    session = client.jmap_session
-
-    # Test: Session has upload_url (RFC 8620 Section 2 requirement)
-    if not session.upload_url:
-        results.record_fail("Session has upload_url", "upload_url not in session")
-        return
-
-    results.record_pass("Session has upload_url", session.upload_url)
-
-    # Get account ID
-    try:
-        account_id = client.account_id
-    except Exception as e:
-        results.record_fail("Blob upload request", f"No account ID: {e}")
-        return
-
-    # Replace {accountId} placeholder in upload_url
-    upload_endpoint = session.upload_url.replace("{accountId}", account_id)
-
-    # Upload test blob
-    test_content = b"Test blob content for RFC 8620 compliance"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/octet-stream",
-    }
-
-    try:
-        response = requests.post(
-            upload_endpoint, headers=headers, data=test_content, timeout=30
-        )
-    except requests.RequestException as e:
-        results.record_fail("Blob upload request", str(e))
-        return
-
-    # Test: HTTP 201 response
-    if response.status_code == 201:
-        results.record_pass("Blob upload returns 201")
-    else:
-        results.record_fail(
-            "Blob upload returns 201", f"Got HTTP {response.status_code}: {response.text}"
-        )
-        return
-
-    # Parse JSON response
-    try:
-        response_data = response.json()
-    except Exception as e:
-        results.record_fail("Blob upload returns valid JSON", str(e))
-        return
-
-    results.record_pass("Blob upload returns valid JSON")
-
-    # Test: RFC 8620 Section 6.1 required fields
-    required_fields = ["accountId", "blobId", "type", "size"]
-    for field in required_fields:
-        if field in response_data:
-            results.record_pass(f"Response has '{field}'", str(response_data[field]))
-        else:
-            results.record_fail(f"Response has '{field}'", "Field missing")
-
-    # Test: accountId matches
-    if response_data.get("accountId") == account_id:
-        results.record_pass("Response accountId matches request")
-    else:
-        results.record_fail(
-            "Response accountId matches request",
-            f"Expected '{account_id}', got '{response_data.get('accountId')}'",
-        )
-
-    # Test: size matches content length
-    if response_data.get("size") == len(test_content):
-        results.record_pass("Response size matches content length")
-    else:
-        results.record_fail(
-            "Response size matches content length",
-            f"Expected {len(test_content)}, got {response_data.get('size')}",
-        )
-
-    # Test: type matches Content-Type
-    if response_data.get("type") == "application/octet-stream":
-        results.record_pass("Response type matches Content-Type")
-    else:
-        results.record_fail(
-            "Response type matches Content-Type",
-            f"Expected 'application/octet-stream', got '{response_data.get('type')}'",
-        )
-
-
-def test_blob_download(client: Client, token: str, results: TestResult) -> str | None:
-    """
-    Test 5: Blob Download (CloudFront Signed URL Redirect)
-
-    Validates:
-    - Session has downloadUrl
-    - Upload blob, then download via /download/{accountId}/{blobId}
-    - Returns 302 redirect to CloudFront signed URL
-    - Following redirect returns original blob content
-    """
-    print()
-    print("Testing Blob Download (redirect to CloudFront signed URL)...")
-
-    session = client.jmap_session
-
-    # Test: Session has download_url (RFC 8620 Section 2 requirement)
-    if not session.download_url:
-        results.record_fail("Session has download_url", "download_url not in session")
-        return None
-
-    results.record_pass("Session has download_url", session.download_url)
-
-    # Get account ID
-    try:
-        account_id = client.account_id
-    except Exception as e:
-        results.record_fail("Blob download request", f"No account ID: {e}")
-        return None
-
-    # First, upload a test blob
-    upload_endpoint = session.upload_url.replace("{accountId}", account_id)
-    test_content = b"Test blob content for download verification - unique content 12345"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/octet-stream",
-    }
-
-    try:
-        upload_response = requests.post(
-            upload_endpoint, headers=headers, data=test_content, timeout=30
-        )
-        if upload_response.status_code != 201:
-            results.record_fail(
-                "Upload blob for download test",
-                f"Got HTTP {upload_response.status_code}: {upload_response.text}",
-            )
-            return None
-        upload_data = upload_response.json()
-        blob_id = upload_data.get("blobId")
-        if not blob_id:
-            results.record_fail("Upload blob for download test", "No blobId in response")
-            return None
-        results.record_pass("Upload blob for download test", f"blobId: {blob_id}")
-    except Exception as e:
-        results.record_fail("Upload blob for download test", str(e))
-        return None
-
-    # Build download URL from session.download_url template
-    download_url = session.download_url.replace("{accountId}", account_id).replace(
-        "{blobId}", blob_id
-    )
-
-    # Request download (should return 302 redirect)
-    try:
-        # Use allow_redirects=False to capture the 302
-        download_response = requests.get(
-            download_url,
-            headers={"Authorization": f"Bearer {token}"},
-            allow_redirects=False,
-            timeout=30,
-        )
-    except Exception as e:
-        results.record_fail("Blob download request", str(e))
-        return None
-
-    # Test: Returns 302 redirect
-    if download_response.status_code == 302:
-        results.record_pass("Blob download returns 302 redirect")
-    else:
-        results.record_fail(
-            "Blob download returns 302 redirect",
-            f"Got HTTP {download_response.status_code}: {download_response.text}",
-        )
-        return None
-
-    # Test: Has Location header
-    location = download_response.headers.get("Location")
-    if location:
-        results.record_pass("Blob download has Location header", location[:100] + "...")
-    else:
-        results.record_fail("Blob download has Location header", "No Location header")
-        return None
-
-    # Test: Location is a CloudFront signed URL
-    if "Signature=" in location or "Key-Pair-Id=" in location:
-        results.record_pass("Location is CloudFront signed URL")
-    else:
-        results.record_fail(
-            "Location is CloudFront signed URL",
-            "URL doesn't contain signature parameters",
-        )
-
-    # Test: Following redirect returns original content
-    try:
-        content_response = requests.get(location, timeout=30)
-        if content_response.status_code == 200:
-            results.record_pass("CloudFront signed URL returns 200")
-            if content_response.content == test_content:
-                results.record_pass("Downloaded content matches uploaded content")
-            else:
-                results.record_fail(
-                    "Downloaded content matches uploaded content",
-                    f"Content mismatch: expected {len(test_content)} bytes, got {len(content_response.content)} bytes",
-                )
-        else:
-            results.record_fail(
-                "CloudFront signed URL returns 200",
-                f"Got HTTP {content_response.status_code}: {content_response.text}",
-            )
-    except Exception as e:
-        results.record_fail("Follow redirect to CloudFront", str(e))
-
-    return blob_id
-
-def test_blob_download_byte_range(client: Client, token: str, results: TestResult) -> str | None:
-    """
-    Test 6: Blob Download Byte Range (composite blobId)
-
-    Validates:
-    - Upload a blob with known content
-    - Download using composite blobId format: blobId,startByte,endByte
-    - Returns 302 redirect to CloudFront signed URL with range in path
-    - Following redirect returns 206 Partial Content with correct byte range
-    """
-    print()
-    print("Testing Blob Download Byte Range (composite blobId)...")
-
-    session = client.jmap_session
-
-    if not session.download_url:
-        results.record_fail("Session has download_url", "download_url not in session")
-        return None
-
-    # Get account ID
-    try:
-        account_id = client.account_id
-    except Exception as e:
-        results.record_fail("Blob byte range test", f"No account ID: {e}")
-        return None
-
-    # Upload a test blob with predictable content
-    upload_endpoint = session.upload_url.replace("{accountId}", account_id)
-    # Create content where we can easily verify byte ranges
-    # "0123456789" repeated = 100 bytes total
-    test_content = b"0123456789" * 10
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/octet-stream",
-    }
-
-    try:
-        upload_response = requests.post(
-            upload_endpoint, headers=headers, data=test_content, timeout=30
-        )
-        if upload_response.status_code != 201:
-            results.record_fail(
-                "Upload blob for byte range test",
-                f"Got HTTP {upload_response.status_code}: {upload_response.text}",
-            )
-            return None
-        upload_data = upload_response.json()
-        blob_id = upload_data.get("blobId")
-        if not blob_id:
-            results.record_fail("Upload blob for byte range test", "No blobId in response")
-            return None
-        results.record_pass("Upload blob for byte range test", f"blobId: {blob_id}, size: {len(test_content)}")
-    except Exception as e:
-        results.record_fail("Upload blob for byte range test", str(e))
-        return None
-
-    # Build download URL with composite blobId: blobId,startByte,endByte
-    # Request bytes 10-29 (20 bytes: "0123456789" twice)
-    start_byte = 10
-    end_byte = 29
-    composite_blob_id = f"{blob_id},{start_byte},{end_byte}"
-    download_url = session.download_url.replace("{accountId}", account_id).replace(
-        "{blobId}", composite_blob_id
-    )
-
-    # Request download with composite blobId (should return 302 redirect)
-    try:
-        download_response = requests.get(
-            download_url,
-            headers={"Authorization": f"Bearer {token}"},
-            allow_redirects=False,
-            timeout=30,
-        )
-    except Exception as e:
-        results.record_fail("Byte range download request", str(e))
-        return None
-
-    # Test: Returns 302 redirect
-    if download_response.status_code == 302:
-        results.record_pass("Byte range download returns 302 redirect")
-    else:
-        results.record_fail(
-            "Byte range download returns 302 redirect",
-            f"Got HTTP {download_response.status_code}: {download_response.text}",
-        )
-        return None
-
-    # Test: Location header contains composite blobId
-    location = download_response.headers.get("Location")
-    if not location:
-        results.record_fail("Byte range download has Location header", "No Location header")
-        return None
-
-    if composite_blob_id in location or f"{start_byte},{end_byte}" in location:
-        results.record_pass("Location contains byte range", location[:100] + "...")
-    else:
-        results.record_fail(
-            "Location contains byte range",
-            f"Expected range in URL, got: {location[:100]}...",
-        )
-
-    # Test: Follow redirect - should get 206 Partial Content
-    try:
-        content_response = requests.get(location, timeout=30)
-
-        # S3 returns 206 for Range requests
-        if content_response.status_code == 206:
-            results.record_pass("CloudFront returns 206 Partial Content")
-        elif content_response.status_code == 200:
-            # Some configurations may return 200 with full content if Range not supported
-            results.record_pass(
-                "CloudFront returns 200",
-                "Note: Range header may not have been applied",
-            )
-        else:
-            results.record_fail(
-                "CloudFront returns 206 Partial Content",
-                f"Got HTTP {content_response.status_code}: {content_response.text[:200]}",
-            )
-            return None
-
-        # Test: Content is the expected byte range
-        expected_content = test_content[start_byte : end_byte + 1]  # Range is inclusive
-        if content_response.content == expected_content:
-            results.record_pass(
-                "Downloaded content matches byte range",
-                f"Got {len(content_response.content)} bytes: {content_response.content[:20]}...",
-            )
-        else:
-            # If we got 200, check if we got full content (Range not applied)
-            if content_response.content == test_content:
-                results.record_fail(
-                    "Downloaded content matches byte range",
-                    f"Got full content ({len(content_response.content)} bytes) instead of range",
-                )
-            else:
-                results.record_fail(
-                    "Downloaded content matches byte range",
-                    f"Expected {len(expected_content)} bytes, got {len(content_response.content)} bytes",
-                )
-    except Exception as e:
-        results.record_fail("Follow redirect for byte range", str(e))
-
-    return blob_id
-
-def test_blob_download_cross_account(client: Client, token: str, results: TestResult) -> str | None:
-    """
-    Test 7: Blob Download Cross-Account Access (should be forbidden)
-
-    Validates that attempting to download a blob using a different accountId
-    in the path returns 403 Forbidden.
-    """
-    print()
-    print("Testing Blob Download Cross-Account Access...")
-
-    session = client.jmap_session
-
-    if not session.download_url:
-        results.record_pass(
-            "Skip cross-account test", "download_url not available"
-        )
-        return None
-
-    # Get actual account ID
-    try:
-        account_id = client.account_id
-    except Exception as e:
-        results.record_fail("Cross-account test", f"No account ID: {e}")
-        return None
-
-    # First, upload a test blob to get a valid blobId
-    upload_endpoint = session.upload_url.replace("{accountId}", account_id)
-    test_content = b"Test blob for cross-account check"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/octet-stream",
-    }
-
-    try:
-        upload_response = requests.post(
-            upload_endpoint, headers=headers, data=test_content, timeout=30
-        )
-        if upload_response.status_code != 201:
-            results.record_fail(
-                "Upload blob for cross-account test",
-                f"Got HTTP {upload_response.status_code}",
-            )
-            return None
-        upload_data = upload_response.json()
-        blob_id = upload_data.get("blobId")
-        if not blob_id:
-            results.record_fail("Upload blob for cross-account test", "No blobId")
-            return None
-    except Exception as e:
-        results.record_fail("Upload blob for cross-account test", str(e))
-        return None
-
-    # Try to download with a different accountId in the path
-    fake_account_id = "fake-account-id-12345"
-    download_url = session.download_url.replace(
-        "{accountId}", fake_account_id
-    ).replace("{blobId}", blob_id)
-
-    try:
-        response = requests.get(
-            download_url,
-            headers={"Authorization": f"Bearer {token}"},
-            allow_redirects=False,
-            timeout=30,
-        )
-    except Exception as e:
-        results.record_fail("Cross-account download request", str(e))
-        return None
-
-    # Test: Returns 403 Forbidden (account ID mismatch)
-    if response.status_code == 403:
-        results.record_pass(
-            "Cross-account download returns 403",
-            "Correctly rejected access to different account",
-        )
-    else:
-        results.record_fail(
-            "Cross-account download returns 403",
-            f"Got HTTP {response.status_code}: {response.text}",
-        )
-
-    return blob_id
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
 
 def get_s3_tags(bucket: str, account_id: str, blob_id: str, region: str) -> dict[str, str]:
     """Get S3 object tags for a blob."""
@@ -722,783 +31,14 @@ def get_s3_tags(bucket: str, account_id: str, blob_id: str, region: str) -> dict
 def get_dynamodb_blob(table: str, account_id: str, blob_id: str, region: str) -> dict | None:
     """Get DynamoDB blob record."""
     dynamodb = boto3.resource("dynamodb", region_name=region)
-    table = dynamodb.Table(table)
-    response = table.get_item(Key={"pk": f"ACCOUNT#{account_id}", "sk": f"BLOB#{blob_id}"})
+    tbl = dynamodb.Table(table)
+    response = tbl.get_item(Key={"pk": f"ACCOUNT#{account_id}", "sk": f"BLOB#{blob_id}"})
     return response.get("Item")
 
 
-def test_blob_upload_with_x_parent(client: Client, config: Config, results: TestResult) -> str | None:
-    """
-    Test 8: Blob Upload with Valid X-Parent Header
-
-    Validates:
-    - Upload blob with X-Parent header
-    - Returns 201 with standard RFC 8620 fields
-    - S3 object has Parent tag with correct value
-    - DynamoDB blob record has parent field with correct value
-    """
-    print()
-    print("Testing Blob Upload with X-Parent Header...")
-
-    session = client.jmap_session
-
-    if not session.upload_url:
-        results.record_fail("Session has upload_url", "upload_url not in session")
-        return None
-
-    try:
-        account_id = client.account_id
-    except Exception as e:
-        results.record_fail("X-Parent upload request", f"No account ID: {e}")
-        return None
-
-    upload_endpoint = session.upload_url.replace("{accountId}", account_id)
-    test_content = b"Test blob content with X-Parent header for RFC 8620 compliance"
-    x_parent_value = "my-folder/subfolder"
-    headers = {
-        "Authorization": f"Bearer {config.token}",
-        "Content-Type": "application/octet-stream",
-        "X-Parent": x_parent_value,
-    }
-
-    try:
-        response = requests.post(
-            upload_endpoint, headers=headers, data=test_content, timeout=30
-        )
-    except requests.RequestException as e:
-        results.record_fail("X-Parent blob upload request", str(e))
-        return None
-
-    # Test: HTTP 201 response
-    if response.status_code == 201:
-        results.record_pass("X-Parent blob upload returns 201")
-    else:
-        results.record_fail(
-            "X-Parent blob upload returns 201", f"Got HTTP {response.status_code}: {response.text}"
-        )
-        return None
-
-    # Parse JSON response
-    try:
-        response_data = response.json()
-    except Exception as e:
-        results.record_fail("X-Parent blob upload returns valid JSON", str(e))
-        return None
-
-    blob_id = response_data.get("blobId")
-    if not blob_id:
-        results.record_fail("X-Parent blob upload has blobId", "No blobId in response")
-        return None
-
-    results.record_pass("X-Parent blob upload has blobId", blob_id)
-
-    # Verify S3 tag
-    if not config.blob_bucket:
-        results.record_fail("S3 Parent tag verification", "BLOB_BUCKET not configured")
-    else:
-        try:
-            tags = get_s3_tags(config.blob_bucket, account_id, blob_id, config.region)
-            if tags.get("Parent") == x_parent_value:
-                results.record_pass("S3 object has Parent tag", f"Parent={x_parent_value}")
-            else:
-                results.record_fail(
-                    "S3 object has Parent tag",
-                    f"Expected Parent='{x_parent_value}', got tags: {tags}",
-                )
-        except Exception as e:
-            results.record_fail("S3 Parent tag verification", str(e))
-
-    # Verify DynamoDB record
-    if not config.dynamodb_table:
-        results.record_fail("DynamoDB parent field verification", "DYNAMODB_TABLE not configured")
-    else:
-        try:
-            item = get_dynamodb_blob(config.dynamodb_table, account_id, blob_id, config.region)
-            if item is None:
-                results.record_fail("DynamoDB parent field verification", "Blob record not found")
-            elif item.get("parent") == x_parent_value:
-                results.record_pass("DynamoDB record has parent field", f"parent={x_parent_value}")
-            else:
-                results.record_fail(
-                    "DynamoDB record has parent field",
-                    f"Expected parent='{x_parent_value}', got: {item.get('parent')}",
-                )
-        except Exception as e:
-            results.record_fail("DynamoDB parent field verification", str(e))
-
-    return blob_id
-
-def test_blob_upload_invalid_x_parent(client: Client, config: Config, results: TestResult):
-    """
-    Test 9: Blob Upload with Invalid X-Parent Header
-
-    Validates:
-    - Upload blob with invalid X-Parent (contains XSS attempt)
-    - Returns 400 Bad Request
-    - Error type is invalidArguments
-    """
-    print()
-    print("Testing Blob Upload with Invalid X-Parent Header...")
-
-    session = client.jmap_session
-
-    if not session.upload_url:
-        results.record_fail("Session has upload_url", "upload_url not in session")
-        return
-
-    try:
-        account_id = client.account_id
-    except Exception as e:
-        results.record_fail("Invalid X-Parent test", f"No account ID: {e}")
-        return
-
-    upload_endpoint = session.upload_url.replace("{accountId}", account_id)
-    test_content = b"Test blob with invalid X-Parent"
-    invalid_x_parent = "<script>alert(1)</script>"
-    headers = {
-        "Authorization": f"Bearer {config.token}",
-        "Content-Type": "application/octet-stream",
-        "X-Parent": invalid_x_parent,
-    }
-
-    try:
-        response = requests.post(
-            upload_endpoint, headers=headers, data=test_content, timeout=30
-        )
-    except requests.RequestException as e:
-        results.record_fail("Invalid X-Parent upload request", str(e))
-        return
-
-    # Test: HTTP 400 response
-    if response.status_code == 400:
-        results.record_pass("Invalid X-Parent upload returns 400")
-    else:
-        results.record_fail(
-            "Invalid X-Parent upload returns 400",
-            f"Got HTTP {response.status_code}: {response.text}",
-        )
-        return
-
-    # Test: Error type is invalidArguments
-    try:
-        response_data = response.json()
-        error_type = response_data.get("type")
-        if error_type == "invalidArguments":
-            results.record_pass("Error type is invalidArguments")
-        else:
-            results.record_fail(
-                "Error type is invalidArguments",
-                f"Got type: {error_type}",
-            )
-    except Exception as e:
-        results.record_fail("Parse error response", str(e))
-
-
-def test_blob_upload_x_parent_too_long(client: Client, config: Config, results: TestResult):
-    """
-    Test 10: Blob Upload with X-Parent Exceeding Max Length
-
-    Validates:
-    - Upload blob with X-Parent of 129 characters (max is 128)
-    - Returns 400 Bad Request
-    - Error type is invalidArguments
-    """
-    print()
-    print("Testing Blob Upload with X-Parent Exceeding Max Length...")
-
-    session = client.jmap_session
-
-    if not session.upload_url:
-        results.record_fail("Session has upload_url", "upload_url not in session")
-        return
-
-    try:
-        account_id = client.account_id
-    except Exception as e:
-        results.record_fail("X-Parent too long test", f"No account ID: {e}")
-        return
-
-    upload_endpoint = session.upload_url.replace("{accountId}", account_id)
-    test_content = b"Test blob with too long X-Parent"
-    # Create a 129-character X-Parent value (exceeds 128 max)
-    too_long_x_parent = "a" * 129
-    headers = {
-        "Authorization": f"Bearer {config.token}",
-        "Content-Type": "application/octet-stream",
-        "X-Parent": too_long_x_parent,
-    }
-
-    try:
-        response = requests.post(
-            upload_endpoint, headers=headers, data=test_content, timeout=30
-        )
-    except requests.RequestException as e:
-        results.record_fail("X-Parent too long upload request", str(e))
-        return
-
-    # Test: HTTP 400 response
-    if response.status_code == 400:
-        results.record_pass("X-Parent too long upload returns 400")
-    else:
-        results.record_fail(
-            "X-Parent too long upload returns 400",
-            f"Got HTTP {response.status_code}: {response.text}",
-        )
-        return
-
-    # Test: Error type is invalidArguments
-    try:
-        response_data = response.json()
-        error_type = response_data.get("type")
-        if error_type == "invalidArguments":
-            results.record_pass("Error type is invalidArguments")
-        else:
-            results.record_fail(
-                "Error type is invalidArguments",
-                f"Got type: {error_type}",
-            )
-    except Exception as e:
-        results.record_fail("Parse error response", str(e))
-
-
-def test_blob_upload_without_x_parent(client: Client, config: Config, results: TestResult) -> str | None:
-    """
-    Test 11: Blob Upload without X-Parent Header
-
-    Validates:
-    - Upload blob without X-Parent header
-    - Returns 201 with standard RFC 8620 fields
-    - S3 object does NOT have Parent tag
-    - DynamoDB blob record does NOT have parent field
-    """
-    print()
-    print("Testing Blob Upload without X-Parent Header (verify no Parent in storage)...")
-
-    session = client.jmap_session
-
-    if not session.upload_url:
-        results.record_fail("Session has upload_url", "upload_url not in session")
-        return None
-
-    try:
-        account_id = client.account_id
-    except Exception as e:
-        results.record_fail("No X-Parent upload request", f"No account ID: {e}")
-        return None
-
-    upload_endpoint = session.upload_url.replace("{accountId}", account_id)
-    test_content = b"Test blob content WITHOUT X-Parent header for storage verification"
-    headers = {
-        "Authorization": f"Bearer {config.token}",
-        "Content-Type": "application/octet-stream",
-        # No X-Parent header
-    }
-
-    try:
-        response = requests.post(
-            upload_endpoint, headers=headers, data=test_content, timeout=30
-        )
-    except requests.RequestException as e:
-        results.record_fail("No X-Parent blob upload request", str(e))
-        return None
-
-    # Test: HTTP 201 response
-    if response.status_code == 201:
-        results.record_pass("No X-Parent blob upload returns 201")
-    else:
-        results.record_fail(
-            "No X-Parent blob upload returns 201", f"Got HTTP {response.status_code}: {response.text}"
-        )
-        return None
-
-    # Parse JSON response
-    try:
-        response_data = response.json()
-    except Exception as e:
-        results.record_fail("No X-Parent blob upload returns valid JSON", str(e))
-        return None
-
-    blob_id = response_data.get("blobId")
-    if not blob_id:
-        results.record_fail("No X-Parent blob upload has blobId", "No blobId in response")
-        return None
-
-    results.record_pass("No X-Parent blob upload has blobId", blob_id)
-
-    # Verify S3 tag is NOT present
-    if not config.blob_bucket:
-        results.record_fail("S3 no Parent tag verification", "BLOB_BUCKET not configured")
-    else:
-        try:
-            tags = get_s3_tags(config.blob_bucket, account_id, blob_id, config.region)
-            if "Parent" not in tags:
-                results.record_pass("S3 object does NOT have Parent tag")
-            else:
-                results.record_fail(
-                    "S3 object does NOT have Parent tag",
-                    f"Unexpected Parent tag found: {tags.get('Parent')}",
-                )
-        except Exception as e:
-            results.record_fail("S3 no Parent tag verification", str(e))
-
-    # Verify DynamoDB record does NOT have parent field
-    if not config.dynamodb_table:
-        results.record_fail("DynamoDB no parent field verification", "DYNAMODB_TABLE not configured")
-    else:
-        try:
-            item = get_dynamodb_blob(config.dynamodb_table, account_id, blob_id, config.region)
-            if item is None:
-                results.record_fail("DynamoDB no parent field verification", "Blob record not found")
-            elif "parent" not in item:
-                results.record_pass("DynamoDB record does NOT have parent field")
-            else:
-                results.record_fail(
-                    "DynamoDB record does NOT have parent field",
-                    f"Unexpected parent field found: {item.get('parent')}",
-                )
-        except Exception as e:
-            results.record_fail("DynamoDB no parent field verification", str(e))
-
-    return blob_id
-
-def test_email_query_response_structure(
-    client: Client, test_data: dict, results: TestResult
-):
-    """
-    Test: Email/query Response Structure
-
-    RFC 8620 Section 5.5: The response MUST contain accountId, queryState,
-    canCalculateChanges, position, and ids fields.
-    """
-    print()
-    print("Testing Email/query response structure (RFC 8620 §5.5)...")
-
-    try:
-        response = client.request(EmailQuery())
-    except Exception as e:
-        results.record_fail("Email/query response structure", str(e))
-        return
-
-    # Check for error response
-    error_type = getattr(response, "type", None)
-    if error_type:
-        results.record_fail(
-            "Email/query response structure",
-            f"JMAP error: {error_type}: {getattr(response, 'description', '')}",
-        )
-        return
-
-    # Verify accountId
-    account_id = getattr(response, "account_id", None)
-    if account_id == test_data["account_id"]:
-        results.record_pass("Response has accountId", account_id)
-    elif account_id:
-        results.record_fail(
-            "Response accountId matches",
-            f"Expected {test_data['account_id']}, got {account_id}",
-        )
-    else:
-        results.record_fail("Response has accountId", "accountId is None")
-
-    # Verify queryState
-    query_state = getattr(response, "query_state", None)
-    if query_state is not None:
-        results.record_pass("Response has queryState", str(query_state))
-    else:
-        results.record_fail("Response has queryState", "queryState is None")
-
-    # Verify canCalculateChanges
-    can_calculate = getattr(response, "can_calculate_changes", None)
-    if can_calculate is not None:
-        results.record_pass("Response has canCalculateChanges", str(can_calculate))
-    else:
-        results.record_fail(
-            "Response has canCalculateChanges", "canCalculateChanges is None"
-        )
-
-    # Verify position
-    position = getattr(response, "position", None)
-    if position is not None:
-        if position == 0:
-            results.record_pass("Response position is 0 for first page")
-        else:
-            results.record_pass("Response has position", str(position))
-    else:
-        results.record_fail("Response has position", "position is None")
-
-    # Verify ids is an array
-    ids = getattr(response, "ids", None)
-    if ids is not None and isinstance(ids, list):
-        results.record_pass("Response has ids array", f"count: {len(ids)}")
-    else:
-        results.record_fail("Response has ids array", f"ids is {type(ids)}")
-
-
-def test_email_query_empty_filter(
-    client: Client, test_data: dict, results: TestResult
-):
-    """
-    Test: Empty Filter Returns All Emails
-
-    RFC 8621 Section 4.4.1: "If zero properties are specified on the
-    FilterCondition, the condition MUST always evaluate to true."
-    """
-    print()
-    print("Testing Email/query with empty filter (RFC 8621 §4.4.1)...")
-
-    try:
-        response = client.request(EmailQuery())
-    except Exception as e:
-        results.record_fail("Email/query empty filter", str(e))
-        return
-
-    error_type = getattr(response, "type", None)
-    if error_type:
-        results.record_fail(
-            "Email/query empty filter",
-            f"JMAP error: {error_type}: {getattr(response, 'description', '')}",
-        )
-        return
-
-    ids = getattr(response, "ids", None) or []
-
-    # All test emails should appear in results
-    test_email_ids = set(test_data["email_ids"])
-    result_ids = set(ids)
-
-    missing = test_email_ids - result_ids
-    if not missing:
-        results.record_pass(
-            "Empty filter returns all test emails",
-            f"Found all {len(test_email_ids)} test emails",
-        )
-    else:
-        results.record_fail(
-            "Empty filter returns all test emails",
-            f"Missing {len(missing)} emails: {missing}",
-        )
-
-
-def test_email_query_sort_received_at_desc(
-    client: Client, test_data: dict, results: TestResult
-):
-    """
-    Test: receivedAt Sorting
-
-    RFC 8621 Section 4.4.2: "receivedAt" MUST be supported for sorting.
-    """
-    print()
-    print("Testing Email/query sort by receivedAt desc (RFC 8621 §4.4.2)...")
-
-    try:
-        response = client.request(
-            EmailQuery(sort=[Comparator(property="receivedAt", is_ascending=False)])
-        )
-    except Exception as e:
-        results.record_fail("Email/query sort receivedAt desc", str(e))
-        return
-
-    error_type = getattr(response, "type", None)
-    if error_type:
-        results.record_fail(
-            "Email/query sort receivedAt desc",
-            f"JMAP error: {error_type}: {getattr(response, 'description', '')}",
-        )
-        return
-
-    ids = getattr(response, "ids", None) or []
-
-    # Filter to only our test emails
-    test_ids = test_data["email_ids"]
-    result_test_ids = [id for id in ids if id in test_ids]
-
-    if len(result_test_ids) != len(test_ids):
-        results.record_fail(
-            "Email/query sort receivedAt desc",
-            f"Expected {len(test_ids)} test emails, found {len(result_test_ids)}",
-        )
-        return
-
-    # Test emails should appear newest-first (reverse of creation order)
-    expected_order = list(reversed(test_ids))
-    if result_test_ids == expected_order:
-        results.record_pass(
-            "Emails sorted by receivedAt descending (newest first)",
-            f"Order: {result_test_ids}",
-        )
-    else:
-        results.record_fail(
-            "Emails sorted by receivedAt descending",
-            f"Expected {expected_order}, got {result_test_ids}",
-        )
-
-
-def test_email_query_pagination(
-    client: Client, test_data: dict, results: TestResult
-):
-    """
-    Test: Pagination with position/limit
-
-    RFC 8620 Section 5.5: The position and limit arguments control pagination.
-    """
-    print()
-    print("Testing Email/query pagination (RFC 8620 §5.5)...")
-
-    # First page: limit=1, position=0
-    try:
-        response1 = client.request(EmailQuery(position=0, limit=1))
-    except Exception as e:
-        results.record_fail("Email/query pagination page 1", str(e))
-        return
-
-    error_type = getattr(response1, "type", None)
-    if error_type:
-        results.record_fail(
-            "Email/query pagination page 1",
-            f"JMAP error: {error_type}",
-        )
-        return
-
-    ids1 = getattr(response1, "ids", None) or []
-    pos1 = getattr(response1, "position", None)
-
-    if len(ids1) != 1:
-        results.record_fail(
-            "Pagination limit=1 returns 1 email",
-            f"Expected 1, got {len(ids1)}",
-        )
-        return
-
-    results.record_pass("Pagination limit=1 returns 1 email", ids1[0])
-
-    if pos1 == 0:
-        results.record_pass("Response position matches request (0)")
-    else:
-        results.record_fail("Response position matches request", f"Expected 0, got {pos1}")
-
-    # Second page: limit=1, position=1
-    try:
-        response2 = client.request(EmailQuery(position=1, limit=1))
-    except Exception as e:
-        results.record_fail("Email/query pagination page 2", str(e))
-        return
-
-    ids2 = getattr(response2, "ids", None) or []
-    pos2 = getattr(response2, "position", None)
-
-    if len(ids2) != 1:
-        results.record_fail(
-            "Pagination page 2 returns 1 email",
-            f"Expected 1, got {len(ids2)}",
-        )
-        return
-
-    results.record_pass("Pagination page 2 returns 1 email", ids2[0])
-
-    if pos2 == 1:
-        results.record_pass("Response position matches request (1)")
-    else:
-        results.record_fail("Response position matches request", f"Expected 1, got {pos2}")
-
-    # Verify no overlap between pages
-    if ids1[0] != ids2[0]:
-        results.record_pass("No overlap between pagination pages")
-    else:
-        results.record_fail(
-            "No overlap between pagination pages",
-            f"Both pages returned {ids1[0]}",
-        )
-
-
-def test_email_query_calculate_total(
-    client: Client, test_data: dict, results: TestResult
-):
-    """
-    Test: calculateTotal
-
-    RFC 8620 Section 5.5: If calculateTotal is true, the response MUST include
-    a total field. If false or omitted, total MAY be omitted.
-    """
-    print()
-    print("Testing Email/query calculateTotal (RFC 8620 §5.5)...")
-
-    # With calculateTotal=True
-    try:
-        response = client.request(EmailQuery(calculate_total=True))
-    except Exception as e:
-        results.record_fail("Email/query calculateTotal=true", str(e))
-        return
-
-    error_type = getattr(response, "type", None)
-    if error_type:
-        results.record_fail(
-            "Email/query calculateTotal=true",
-            f"JMAP error: {error_type}",
-        )
-        return
-
-    total = getattr(response, "total", None)
-    if total is not None:
-        # Total should be at least the number of test emails
-        if total >= len(test_data["email_ids"]):
-            results.record_pass(
-                "calculateTotal=true returns total",
-                f"total={total} (expected >= {len(test_data['email_ids'])})",
-            )
-        else:
-            results.record_fail(
-                "calculateTotal=true returns correct total",
-                f"total={total}, expected >= {len(test_data['email_ids'])}",
-            )
-    else:
-        # RFC 8620 says total is "only if requested" - not a hard MUST
-        # but strongly implied. Log as pass with note.
-        results.record_pass(
-            "calculateTotal=true (total not returned)",
-            "RFC permits omission but recommends including when requested",
-        )
-
-    # With calculateTotal=False (or omitted)
-    try:
-        response2 = client.request(EmailQuery(calculate_total=False))
-    except Exception as e:
-        results.record_fail("Email/query calculateTotal=false", str(e))
-        return
-
-    # RFC says total MAY be omitted - either None or present is acceptable
-    total2 = getattr(response2, "total", None)
-    if total2 is None:
-        results.record_pass("calculateTotal=false omits total (as permitted by RFC)")
-    else:
-        results.record_pass(
-            "calculateTotal=false includes total (optional)",
-            f"total={total2}",
-        )
-
-
-def test_email_query_position_beyond_results(
-    client: Client, test_data: dict, results: TestResult
-):
-    """
-    Test: Empty Results for Position Beyond Results
-
-    RFC 8620 Section 5.5: "If the index is greater than or equal to the total
-    number of objects in the results list, then the 'ids' array in the response
-    will be empty, but this is not an error."
-    """
-    print()
-    print("Testing Email/query position beyond results (RFC 8620 §5.5)...")
-
-    try:
-        response = client.request(EmailQuery(position=9999))
-    except Exception as e:
-        results.record_fail("Email/query position=9999", str(e))
-        return
-
-    # This should NOT be an error
-    error_type = getattr(response, "type", None)
-    if error_type:
-        results.record_fail(
-            "Position beyond results is not an error",
-            f"Got JMAP error: {error_type}",
-        )
-        return
-
-    results.record_pass("Position beyond results is not an error")
-
-    ids = getattr(response, "ids", None)
-    if ids is not None and isinstance(ids, list) and len(ids) == 0:
-        results.record_pass("ids is empty array when position beyond results")
-    else:
-        results.record_fail(
-            "ids is empty array when position beyond results",
-            f"ids = {ids}",
-        )
-
-
-def test_email_query_stable_sort(
-    client: Client, test_data: dict, results: TestResult
-):
-    """
-    Test: Stable Sort Order
-
-    RFC 8620 Section 5.5: "...the sort order is server dependent, but it MUST
-    be stable between calls"
-    """
-    print()
-    print("Testing Email/query stable sort (RFC 8620 §5.5)...")
-
-    try:
-        response1 = client.request(EmailQuery())
-    except Exception as e:
-        results.record_fail("Email/query stable sort (call 1)", str(e))
-        return
-
-    error_type = getattr(response1, "type", None)
-    if error_type:
-        results.record_fail(
-            "Email/query stable sort (call 1)",
-            f"JMAP error: {error_type}",
-        )
-        return
-
-    ids1 = getattr(response1, "ids", None) or []
-
-    try:
-        response2 = client.request(EmailQuery())
-    except Exception as e:
-        results.record_fail("Email/query stable sort (call 2)", str(e))
-        return
-
-    error_type2 = getattr(response2, "type", None)
-    if error_type2:
-        results.record_fail(
-            "Email/query stable sort (call 2)",
-            f"JMAP error: {error_type2}",
-        )
-        return
-
-    ids2 = getattr(response2, "ids", None) or []
-
-    if ids1 == ids2:
-        results.record_pass(
-            "Same query returns identical order",
-            f"Both calls returned {len(ids1)} emails in same order",
-        )
-    else:
-        results.record_fail(
-            "Same query returns identical order",
-            f"Call 1: {ids1[:5]}..., Call 2: {ids2[:5]}...",
-        )
-
-
-def print_summary(results: TestResult):
-    """Print test summary."""
-    print()
-    print("=" * 40)
-    print("JMAP Protocol Compliance Test Summary")
-    print("=" * 40)
-    print(f"Tests run:   {results.total}")
-    print(f"{Colors.GREEN}Passed:      {results.passed}{Colors.NC}")
-    if results.failed > 0:
-        print(f"{Colors.RED}Failed:      {results.failed}{Colors.NC}")
-    else:
-        print(f"Failed:      {results.failed}")
-    print("=" * 40)
-
-    if results.all_passed:
-        print(f"{Colors.GREEN}ALL TESTS PASSED{Colors.NC}")
-    else:
-        print(f"{Colors.RED}SOME TESTS FAILED{Colors.NC}")
-
-
-def delete_blob(client: Client, token: str, account_id: str, blob_id: str) -> requests.Response:
-    """Send DELETE /delete/{accountId}/{blobId} with bearer token.
-
-    Derives the delete URL from the session's download_url to include the
-    correct API Gateway stage prefix (e.g. /v1).
-    """
-    download_url = client.jmap_session.download_url
+def delete_blob(jmap_client, token: str, account_id: str, blob_id: str) -> requests.Response:
+    """Send DELETE /delete/{accountId}/{blobId} with bearer token."""
+    download_url = jmap_client.jmap_session.download_url
     delete_url_template = download_url.replace("/download/", "/delete/")
     url = delete_url_template.replace("{accountId}", account_id).replace("{blobId}", blob_id)
     return requests.delete(
@@ -1508,221 +48,549 @@ def delete_blob(client: Client, token: str, account_id: str, blob_id: str) -> re
     )
 
 
-def cleanup_uploaded_blobs(
-    client: Client, token: str, account_id: str, blob_ids: list[str],
-    config: Config, results: TestResult,
-):
-    """Delete all uploaded blobs via the Cognito delete endpoint, then verify async cleanup removes S3 objects and DynamoDB records."""
-    import time
+def _upload_blob(upload_url: str, token: str, account_id: str, content: bytes,
+                 content_type: str = "application/octet-stream",
+                 extra_headers: dict | None = None) -> requests.Response:
+    """Upload a blob and return the raw response."""
+    upload_endpoint = upload_url.replace("{accountId}", account_id)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": content_type,
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+    return requests.post(upload_endpoint, headers=headers, data=content, timeout=30)
 
-    print()
-    print("Testing Blob Delete (Cognito Auth) + Cleanup...")
 
-    successfully_deleted = []
-    for blob_id in blob_ids:
-        try:
-            response = delete_blob(client, token, account_id, blob_id)
-            if response.status_code == 204:
-                results.record_pass(f"Blob delete {blob_id}", "204 No Content")
-                successfully_deleted.append(blob_id)
-            else:
-                results.record_fail(
-                    f"Blob delete {blob_id}",
-                    f"Got HTTP {response.status_code}: {response.text}",
-                )
-        except Exception as e:
-            results.record_fail(f"Blob delete {blob_id}", str(e))
+# ---------------------------------------------------------------------------
+# Session Discovery
+# ---------------------------------------------------------------------------
 
-    # Verify async cleanup (DynamoDB Streams → blob-cleanup lambda)
-    if not successfully_deleted:
+def test_client_connection(jmap_client):
+    """Session Discovery via jmapc Client."""
+    session = jmap_client.jmap_session
+    assert session.api_url, "api_url is None or empty"
+
+    assert session.capabilities and session.capabilities.core, \
+        "capabilities.core is None"
+
+    account_id = jmap_client.account_id
+    assert account_id, "No account ID found"
+
+    assert session.primary_accounts, "primary_accounts is None"
+
+    assert session.state, "state is None or empty"
+
+
+# ---------------------------------------------------------------------------
+# Core/echo
+# ---------------------------------------------------------------------------
+
+def test_core_echo(jmap_client):
+    """Core/echo echoes back arguments unchanged (RFC 8620 Section 3.5)."""
+    test_data = {"hello": True, "count": 42, "nested": {"key": "value", "array": [1, 2, 3]}}
+
+    response = jmap_client.request(CoreEcho(data=test_data))
+    response_data = getattr(response, "data", None)
+    assert response_data == test_data, \
+        f"Expected: {test_data}\nGot: {response_data}"
+
+
+# ---------------------------------------------------------------------------
+# Email/query (basic)
+# ---------------------------------------------------------------------------
+
+def test_email_query(jmap_client):
+    """Basic Email/query request via jmapc."""
+    response = jmap_client.request(EmailQuery())
+
+    # Either a successful query or a JMAP error is acceptable at this level
+    error_type = getattr(response, "type", None)
+    error_desc = getattr(response, "description", None)
+    if error_type and error_desc:
+        # JMAP error response is acceptable
         return
 
-    can_check_s3 = hasattr(config, 'blob_bucket') and config.blob_bucket
-    can_check_ddb = hasattr(config, 'dynamodb_table') and config.dynamodb_table
-
-    if not can_check_s3 and not can_check_ddb:
-        return
-
-    import boto3
-
-    s3_client = boto3.client("s3", region_name=config.region) if can_check_s3 else None
-
-    max_wait = 30
-    poll_interval = 2
-    elapsed = 0
-
-    # Track which blobs still need verification
-    pending_s3 = set(successfully_deleted) if can_check_s3 else set()
-    pending_ddb = set(successfully_deleted) if can_check_ddb else set()
-
-    while (pending_s3 or pending_ddb) and elapsed < max_wait:
-        time.sleep(poll_interval)
-        elapsed += poll_interval
-
-        for blob_id in list(pending_s3):
-            key = f"{account_id}/{blob_id}"
-            try:
-                s3_client.head_object(Bucket=config.blob_bucket, Key=key)
-                # Still exists, keep polling
-            except s3_client.exceptions.ClientError as e:
-                if e.response["Error"]["Code"] == "404":
-                    pending_s3.discard(blob_id)
-
-        for blob_id in list(pending_ddb):
-            item = get_dynamodb_blob(config.dynamodb_table, account_id, blob_id, config.region)
-            if item is None:
-                pending_ddb.discard(blob_id)
-
-    # Record results
-    for blob_id in successfully_deleted:
-        if can_check_s3:
-            if blob_id not in pending_s3:
-                results.record_pass(f"Blob cleanup S3 {blob_id}", "S3 object removed")
-            else:
-                results.record_fail(f"Blob cleanup S3 {blob_id}", f"S3 object still exists after {max_wait}s")
-
-        if can_check_ddb:
-            if blob_id not in pending_ddb:
-                results.record_pass(f"Blob cleanup DynamoDB {blob_id}", "DynamoDB record removed")
-            else:
-                results.record_fail(f"Blob cleanup DynamoDB {blob_id}", f"DynamoDB record still exists after {max_wait}s")
+    ids = getattr(response, "ids", None)
+    assert ids is not None, "No ids field in response"
+    assert hasattr(response, "query_state"), "No query_state field"
 
 
-def main():
-    """Run all JMAP protocol compliance tests."""
-    print("=" * 40)
-    print("JMAP Protocol Compliance Tests (jmapc)")
-    print("=" * 40)
+# ---------------------------------------------------------------------------
+# Blob tests (with cleanup)
+# ---------------------------------------------------------------------------
 
-    config = get_config()
-    results = TestResult()
+class TestBlobs:
+    """Blob upload/download/delete tests with automatic cleanup."""
 
-    # Test 1: Session Discovery via jmapc Client
-    client = test_client_connection(config.host, config.token, results)
+    @pytest.fixture(autouse=True)
+    def _track_blobs(self, jmap_client, token, account_id, upload_url,
+                     blob_bucket, dynamodb_table, aws_region):
+        """Track uploaded blob IDs and clean up after all blob tests."""
+        self._blob_ids: list[str] = []
+        self._jmap_client = jmap_client
+        self._token = token
+        self._account_id = account_id
+        self._upload_url = upload_url
+        self._blob_bucket = blob_bucket
+        self._dynamodb_table = dynamodb_table
+        self._aws_region = aws_region
+        yield
+        # Cleanup runs after each test; we use class-level list via _record_blob
+        # Cleanup is handled by the class-scoped fixture below instead.
 
-    if client:
-        # Test 2: Core/echo
-        test_core_echo(client, results)
+    @pytest.fixture(scope="class", autouse=True)
+    def _cleanup_blobs(self, jmap_client, token, account_id,
+                       blob_bucket, dynamodb_table, aws_region):
+        """Class-scoped fixture that cleans up all tracked blobs after the class."""
+        blob_ids: list[str] = []
+        # Stash on the class so individual tests can append
+        TestBlobs._class_blob_ids = blob_ids
+        yield
+        # Cleanup
+        if not blob_ids:
+            return
 
-        # Test 3: Email/query
-        test_email_query(client, results)
+        successfully_deleted = []
+        for blob_id in blob_ids:
+            resp = delete_blob(jmap_client, token, account_id, blob_id)
+            assert resp.status_code == 204, \
+                f"Blob delete {blob_id} got HTTP {resp.status_code}: {resp.text}"
+            successfully_deleted.append(blob_id)
 
-        # Collect blob IDs for cleanup
-        uploaded_blob_ids: list[str] = []
+        if not successfully_deleted:
+            return
 
-        # Test 4: Blob Upload
-        blob_id = test_blob_upload(client, config.token, results)
+        can_check_s3 = bool(blob_bucket)
+        can_check_ddb = bool(dynamodb_table)
+        if not can_check_s3 and not can_check_ddb:
+            return
+
+        s3_client = boto3.client("s3", region_name=aws_region) if can_check_s3 else None
+
+        max_wait = 30
+        poll_interval = 2
+        elapsed = 0
+        pending_s3 = set(successfully_deleted) if can_check_s3 else set()
+        pending_ddb = set(successfully_deleted) if can_check_ddb else set()
+
+        while (pending_s3 or pending_ddb) and elapsed < max_wait:
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+
+            for bid in list(pending_s3):
+                key = f"{account_id}/{bid}"
+                try:
+                    s3_client.head_object(Bucket=blob_bucket, Key=key)
+                except s3_client.exceptions.ClientError as e:
+                    if e.response["Error"]["Code"] == "404":
+                        pending_s3.discard(bid)
+
+            for bid in list(pending_ddb):
+                item = get_dynamodb_blob(dynamodb_table, account_id, bid, aws_region)
+                if item is None:
+                    pending_ddb.discard(bid)
+
+        for bid in successfully_deleted:
+            if can_check_s3:
+                assert bid not in pending_s3, \
+                    f"S3 object {bid} still exists after {max_wait}s"
+            if can_check_ddb:
+                assert bid not in pending_ddb, \
+                    f"DynamoDB record {bid} still exists after {max_wait}s"
+
+    def _record_blob(self, blob_id: str | None):
         if blob_id:
-            uploaded_blob_ids.append(blob_id)
+            TestBlobs._class_blob_ids.append(blob_id)
 
-        # Test 5: Blob Download
-        blob_id = test_blob_download(client, config.token, results)
-        if blob_id:
-            uploaded_blob_ids.append(blob_id)
+    def test_blob_upload(self, upload_url, token, account_id):
+        """Blob Upload (RFC 8620 Section 6.1)."""
+        test_content = b"Test blob content for RFC 8620 compliance"
+        response = _upload_blob(upload_url, token, account_id, test_content)
 
-        # Test 6: Blob Download Byte Range
-        blob_id = test_blob_download_byte_range(client, config.token, results)
-        if blob_id:
-            uploaded_blob_ids.append(blob_id)
+        assert response.status_code == 201, \
+            f"Got HTTP {response.status_code}: {response.text}"
 
-        # Test 7: Blob Download Cross-Account Access
-        blob_id = test_blob_download_cross_account(client, config.token, results)
-        if blob_id:
-            uploaded_blob_ids.append(blob_id)
+        response_data = response.json()
 
-        # Test 8: Blob Upload with X-Parent Header
-        blob_id = test_blob_upload_with_x_parent(client, config, results)
-        if blob_id:
-            uploaded_blob_ids.append(blob_id)
+        required_fields = ["accountId", "blobId", "type", "size"]
+        for field in required_fields:
+            assert field in response_data, f"Response missing '{field}'"
 
-        # Test 9: Blob Upload with Invalid X-Parent Header
-        test_blob_upload_invalid_x_parent(client, config, results)
+        assert response_data["accountId"] == account_id, \
+            f"Expected '{account_id}', got '{response_data.get('accountId')}'"
+        assert response_data["size"] == len(test_content), \
+            f"Expected {len(test_content)}, got {response_data.get('size')}"
+        assert response_data["type"] == "application/octet-stream", \
+            f"Expected 'application/octet-stream', got '{response_data.get('type')}'"
 
-        # Test 10: Blob Upload with X-Parent Exceeding Max Length
-        test_blob_upload_x_parent_too_long(client, config, results)
+        self._record_blob(response_data.get("blobId"))
 
-        # Test 11: Blob Upload without X-Parent (verify no Parent in storage)
-        blob_id = test_blob_upload_without_x_parent(client, config, results)
-        if blob_id:
-            uploaded_blob_ids.append(blob_id)
+    def test_blob_download(self, jmap_client, upload_url, token, account_id):
+        """Blob Download - redirect to CloudFront signed URL."""
+        session = jmap_client.jmap_session
+        assert session.download_url, "download_url not in session"
 
-        # Blob Delete + Cleanup (tests Cognito delete endpoint)
-        if uploaded_blob_ids:
-            account_id = client.account_id
-            cleanup_uploaded_blobs(
-                client, config.token, account_id, uploaded_blob_ids, config, results
-            )
+        test_content = b"Test blob content for download verification - unique content 12345"
+        upload_response = _upload_blob(upload_url, token, account_id, test_content)
+        assert upload_response.status_code == 201, \
+            f"Upload got HTTP {upload_response.status_code}: {upload_response.text}"
 
-        # Test 12: Email/import and Email/get round-trip
-        test_email_import_and_get(client, config, results)
+        upload_data = upload_response.json()
+        blob_id = upload_data.get("blobId")
+        assert blob_id, "No blobId in upload response"
+        self._record_blob(blob_id)
 
-        # Email/query E2E Tests (RFC 8620 §5.5 and RFC 8621 §4.4)
-        # Set up test data: mailbox with 3 emails at staggered receivedAt times
-        query_test_data = setup_query_test_data(client, config, results)
-        if query_test_data:
-            # Test 13: Email/query response structure
-            test_email_query_response_structure(client, query_test_data, results)
+        download_url = session.download_url.replace("{accountId}", account_id).replace(
+            "{blobId}", blob_id
+        )
 
-            # Test 14: Empty filter returns all emails
-            test_email_query_empty_filter(client, query_test_data, results)
+        download_response = requests.get(
+            download_url,
+            headers={"Authorization": f"Bearer {token}"},
+            allow_redirects=False,
+            timeout=30,
+        )
+        assert download_response.status_code == 302, \
+            f"Got HTTP {download_response.status_code}: {download_response.text}"
 
-            # Test 15: receivedAt sorting
-            test_email_query_sort_received_at_desc(client, query_test_data, results)
+        location = download_response.headers.get("Location")
+        assert location, "No Location header"
 
-            # Test 16: Pagination
-            test_email_query_pagination(client, query_test_data, results)
+        assert "Signature=" in location or "Key-Pair-Id=" in location, \
+            "URL doesn't contain signature parameters"
 
-            # Test 17: calculateTotal
-            test_email_query_calculate_total(client, query_test_data, results)
+        content_response = requests.get(location, timeout=30)
+        assert content_response.status_code == 200, \
+            f"CloudFront got HTTP {content_response.status_code}: {content_response.text}"
+        assert content_response.content == test_content, \
+            f"Content mismatch: expected {len(test_content)} bytes, got {len(content_response.content)} bytes"
 
-            # Test 18: Position beyond results
-            test_email_query_position_beyond_results(client, query_test_data, results)
+    def test_blob_download_byte_range(self, jmap_client, upload_url, token, account_id):
+        """Blob Download Byte Range (composite blobId)."""
+        session = jmap_client.jmap_session
+        assert session.download_url, "download_url not in session"
 
-            # Test 19: Stable sort order
-            test_email_query_stable_sort(client, query_test_data, results)
+        test_content = b"0123456789" * 10
+        upload_response = _upload_blob(upload_url, token, account_id, test_content)
+        assert upload_response.status_code == 201, \
+            f"Upload got HTTP {upload_response.status_code}: {upload_response.text}"
 
-            # Cleanup query test data emails
-            query_email_ids = query_test_data.get("email_ids", [])
-            if query_email_ids:
-                account_id = query_test_data["account_id"]
-                api_url = client.jmap_session.api_url
-                destroy_emails_and_verify_cleanup(
-                    api_url, config.token, account_id, query_email_ids,
-                    config, results,
-                    test_name_prefix="[query test data cleanup]",
-                )
+        upload_data = upload_response.json()
+        blob_id = upload_data.get("blobId")
+        assert blob_id, "No blobId in upload response"
+        self._record_blob(blob_id)
 
-        # Thread/get E2E Tests (RFC 8621 §3)
-        test_thread_operations(client, config, results)
+        start_byte = 10
+        end_byte = 29
+        composite_blob_id = f"{blob_id},{start_byte},{end_byte}"
+        download_url = session.download_url.replace("{accountId}", account_id).replace(
+            "{blobId}", composite_blob_id
+        )
 
-        # Thread/changes E2E Tests (RFC 8620 §5.2 and RFC 8621 §3.2)
-        test_thread_changes(client, config, results)
+        download_response = requests.get(
+            download_url,
+            headers={"Authorization": f"Bearer {token}"},
+            allow_redirects=False,
+            timeout=30,
+        )
+        assert download_response.status_code == 302, \
+            f"Got HTTP {download_response.status_code}: {download_response.text}"
 
-        # Email/changes E2E Tests (RFC 8620 §5.2)
-        test_email_changes(client, config, results)
+        location = download_response.headers.get("Location")
+        assert location, "No Location header"
+        assert composite_blob_id in location or f"{start_byte},{end_byte}" in location, \
+            f"Expected range in URL, got: {location[:100]}..."
 
-        # Mailbox/changes E2E Tests (RFC 8620 §5.2)
-        test_mailbox_changes(client, config, results)
+        content_response = requests.get(location, timeout=30)
+        assert content_response.status_code in (200, 206), \
+            f"Got HTTP {content_response.status_code}: {content_response.text[:200]}"
 
-        # Email/set E2E Tests (RFC 8620 §5.3 and RFC 8621 §4.6)
-        test_email_set_mailbox_changes(client, config, results)
-        test_email_set_counter_updates(client, config, results)
-        test_email_set_state_tracking(client, config, results)
-        test_email_set_keyword_updates(client, config, results)
-        test_email_set_invalid_patches(client, config, results)
+        expected_content = test_content[start_byte:end_byte + 1]
+        assert content_response.content == expected_content, \
+            f"Expected {len(expected_content)} bytes, got {len(content_response.content)} bytes"
 
-        # Email/get header:{name} property tests (RFC 8621 §4.1.3)
-        test_header_properties(client, config, results)
+    def test_blob_download_cross_account(self, jmap_client, upload_url, token, account_id):
+        """Blob Download Cross-Account Access should be forbidden."""
+        session = jmap_client.jmap_session
+        assert session.download_url, "download_url not in session"
 
-        # Result References tests (RFC 8620 §3.7)
-        test_result_references(client, config, results)
+        test_content = b"Test blob for cross-account check"
+        upload_response = _upload_blob(upload_url, token, account_id, test_content)
+        assert upload_response.status_code == 201, \
+            f"Upload got HTTP {upload_response.status_code}"
 
-    # Print summary
-    print_summary(results)
+        upload_data = upload_response.json()
+        blob_id = upload_data.get("blobId")
+        assert blob_id, "No blobId"
+        self._record_blob(blob_id)
 
-    # Exit with appropriate code
-    sys.exit(0 if results.all_passed else 1)
+        fake_account_id = "fake-account-id-12345"
+        download_url = session.download_url.replace(
+            "{accountId}", fake_account_id
+        ).replace("{blobId}", blob_id)
+
+        response = requests.get(
+            download_url,
+            headers={"Authorization": f"Bearer {token}"},
+            allow_redirects=False,
+            timeout=30,
+        )
+        assert response.status_code == 403, \
+            f"Got HTTP {response.status_code}: {response.text}"
+
+    def test_blob_upload_with_x_parent(self, upload_url, token, account_id,
+                                       blob_bucket, dynamodb_table, aws_region):
+        """Blob Upload with Valid X-Parent Header."""
+        test_content = b"Test blob content with X-Parent header for RFC 8620 compliance"
+        x_parent_value = "my-folder/subfolder"
+
+        response = _upload_blob(
+            upload_url, token, account_id, test_content,
+            extra_headers={"X-Parent": x_parent_value},
+        )
+        assert response.status_code == 201, \
+            f"Got HTTP {response.status_code}: {response.text}"
+
+        response_data = response.json()
+        blob_id = response_data.get("blobId")
+        assert blob_id, "No blobId in response"
+        self._record_blob(blob_id)
+
+        # Verify S3 tag
+        assert blob_bucket, "BLOB_BUCKET not configured"
+        tags = get_s3_tags(blob_bucket, account_id, blob_id, aws_region)
+        assert tags.get("Parent") == x_parent_value, \
+            f"Expected Parent='{x_parent_value}', got tags: {tags}"
+
+        # Verify DynamoDB record
+        assert dynamodb_table, "DYNAMODB_TABLE not configured"
+        item = get_dynamodb_blob(dynamodb_table, account_id, blob_id, aws_region)
+        assert item is not None, "Blob record not found"
+        assert item.get("parent") == x_parent_value, \
+            f"Expected parent='{x_parent_value}', got: {item.get('parent')}"
+
+    def test_blob_upload_invalid_x_parent(self, upload_url, token, account_id):
+        """Blob Upload with Invalid X-Parent Header returns 400."""
+        test_content = b"Test blob with invalid X-Parent"
+        invalid_x_parent = "<script>alert(1)</script>"
+
+        response = _upload_blob(
+            upload_url, token, account_id, test_content,
+            extra_headers={"X-Parent": invalid_x_parent},
+        )
+        assert response.status_code == 400, \
+            f"Got HTTP {response.status_code}: {response.text}"
+
+        response_data = response.json()
+        assert response_data.get("type") == "invalidArguments", \
+            f"Got type: {response_data.get('type')}"
+
+    def test_blob_upload_x_parent_too_long(self, upload_url, token, account_id):
+        """Blob Upload with X-Parent Exceeding Max Length returns 400."""
+        test_content = b"Test blob with too long X-Parent"
+        too_long_x_parent = "a" * 129
+
+        response = _upload_blob(
+            upload_url, token, account_id, test_content,
+            extra_headers={"X-Parent": too_long_x_parent},
+        )
+        assert response.status_code == 400, \
+            f"Got HTTP {response.status_code}: {response.text}"
+
+        response_data = response.json()
+        assert response_data.get("type") == "invalidArguments", \
+            f"Got type: {response_data.get('type')}"
+
+    def test_blob_upload_without_x_parent(self, upload_url, token, account_id,
+                                          blob_bucket, dynamodb_table, aws_region):
+        """Blob Upload without X-Parent Header - verify no Parent in storage."""
+        test_content = b"Test blob content WITHOUT X-Parent header for storage verification"
+
+        response = _upload_blob(upload_url, token, account_id, test_content)
+        assert response.status_code == 201, \
+            f"Got HTTP {response.status_code}: {response.text}"
+
+        response_data = response.json()
+        blob_id = response_data.get("blobId")
+        assert blob_id, "No blobId in response"
+        self._record_blob(blob_id)
+
+        # Verify S3 tag is NOT present
+        assert blob_bucket, "BLOB_BUCKET not configured"
+        tags = get_s3_tags(blob_bucket, account_id, blob_id, aws_region)
+        assert "Parent" not in tags, \
+            f"Unexpected Parent tag found: {tags.get('Parent')}"
+
+        # Verify DynamoDB record does NOT have parent field
+        assert dynamodb_table, "DYNAMODB_TABLE not configured"
+        item = get_dynamodb_blob(dynamodb_table, account_id, blob_id, aws_region)
+        assert item is not None, "Blob record not found"
+        assert "parent" not in item, \
+            f"Unexpected parent field found: {item.get('parent')}"
 
 
-if __name__ == "__main__":
-    main()
+# ---------------------------------------------------------------------------
+# Email/query E2E tests (RFC 8620 Section 5.5, RFC 8621 Section 4.4)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def query_test_data(jmap_client, api_url, upload_url, token, account_id):
+    """Set up test data for Email/query tests: mailbox with 3 emails at staggered times."""
+    from helpers import create_test_mailbox, destroy_emails_and_verify_cleanup
+    import time as _time
+
+    mailbox_id = create_test_mailbox(api_url, token, account_id, prefix="QueryTest")
+    assert mailbox_id, "Failed to create test mailbox"
+
+    email_ids = []
+    for i in range(3):
+        from helpers import import_test_email
+        email_id = import_test_email(api_url, upload_url, token, account_id, mailbox_id)
+        assert email_id, f"Failed to import test email {i}"
+        email_ids.append(email_id)
+        if i < 2:
+            _time.sleep(1)  # stagger receivedAt
+
+    data = {
+        "account_id": account_id,
+        "mailbox_id": mailbox_id,
+        "email_ids": email_ids,
+    }
+
+    yield data
+
+    # Cleanup
+    destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+
+
+def test_email_query_response_structure(jmap_client, query_test_data):
+    """Email/query Response Structure (RFC 8620 Section 5.5)."""
+    response = jmap_client.request(EmailQuery())
+
+    error_type = getattr(response, "type", None)
+    assert not error_type, \
+        f"JMAP error: {error_type}: {getattr(response, 'description', '')}"
+
+    resp_account_id = getattr(response, "account_id", None)
+    assert resp_account_id == query_test_data["account_id"], \
+        f"Expected {query_test_data['account_id']}, got {resp_account_id}"
+
+    query_state = getattr(response, "query_state", None)
+    assert query_state is not None, "queryState is None"
+
+    can_calculate = getattr(response, "can_calculate_changes", None)
+    assert can_calculate is not None, "canCalculateChanges is None"
+
+    position = getattr(response, "position", None)
+    assert position is not None, "position is None"
+
+    ids = getattr(response, "ids", None)
+    assert ids is not None and isinstance(ids, list), f"ids is {type(ids)}"
+
+
+def test_email_query_empty_filter(jmap_client, query_test_data):
+    """Empty Filter Returns All Emails (RFC 8621 Section 4.4.1)."""
+    response = jmap_client.request(EmailQuery())
+
+    error_type = getattr(response, "type", None)
+    assert not error_type, \
+        f"JMAP error: {error_type}: {getattr(response, 'description', '')}"
+
+    ids = getattr(response, "ids", None) or []
+    test_email_ids = set(query_test_data["email_ids"])
+    result_ids = set(ids)
+
+    missing = test_email_ids - result_ids
+    assert not missing, f"Missing {len(missing)} emails: {missing}"
+
+
+def test_email_query_sort_received_at_desc(jmap_client, query_test_data):
+    """receivedAt Sorting (RFC 8621 Section 4.4.2)."""
+    response = jmap_client.request(
+        EmailQuery(sort=[Comparator(property="receivedAt", is_ascending=False)])
+    )
+
+    error_type = getattr(response, "type", None)
+    assert not error_type, \
+        f"JMAP error: {error_type}: {getattr(response, 'description', '')}"
+
+    ids = getattr(response, "ids", None) or []
+    test_ids = query_test_data["email_ids"]
+    result_test_ids = [id for id in ids if id in test_ids]
+
+    assert len(result_test_ids) == len(test_ids), \
+        f"Expected {len(test_ids)} test emails, found {len(result_test_ids)}"
+
+    expected_order = list(reversed(test_ids))
+    assert result_test_ids == expected_order, \
+        f"Expected {expected_order}, got {result_test_ids}"
+
+
+def test_email_query_pagination(jmap_client, query_test_data):
+    """Pagination with position/limit (RFC 8620 Section 5.5)."""
+    response1 = jmap_client.request(EmailQuery(position=0, limit=1))
+
+    error_type = getattr(response1, "type", None)
+    assert not error_type, f"JMAP error: {error_type}"
+
+    ids1 = getattr(response1, "ids", None) or []
+    pos1 = getattr(response1, "position", None)
+
+    assert len(ids1) == 1, f"Expected 1, got {len(ids1)}"
+    assert pos1 == 0, f"Expected position 0, got {pos1}"
+
+    response2 = jmap_client.request(EmailQuery(position=1, limit=1))
+    ids2 = getattr(response2, "ids", None) or []
+    pos2 = getattr(response2, "position", None)
+
+    assert len(ids2) == 1, f"Expected 1, got {len(ids2)}"
+    assert pos2 == 1, f"Expected position 1, got {pos2}"
+
+    assert ids1[0] != ids2[0], f"Both pages returned {ids1[0]}"
+
+
+def test_email_query_calculate_total(jmap_client, query_test_data):
+    """calculateTotal (RFC 8620 Section 5.5)."""
+    response = jmap_client.request(EmailQuery(calculate_total=True))
+
+    error_type = getattr(response, "type", None)
+    assert not error_type, f"JMAP error: {error_type}"
+
+    total = getattr(response, "total", None)
+    if total is not None:
+        assert total >= len(query_test_data["email_ids"]), \
+            f"total={total}, expected >= {len(query_test_data['email_ids'])}"
+
+    # With calculateTotal=False
+    response2 = jmap_client.request(EmailQuery(calculate_total=False))
+    # RFC says total MAY be omitted - either None or present is acceptable
+    # No assertion needed here; both outcomes are valid.
+
+
+def test_email_query_position_beyond_results(jmap_client, query_test_data):
+    """Empty Results for Position Beyond Results (RFC 8620 Section 5.5)."""
+    response = jmap_client.request(EmailQuery(position=9999))
+
+    error_type = getattr(response, "type", None)
+    assert not error_type, f"Position beyond results should not be an error, got: {error_type}"
+
+    ids = getattr(response, "ids", None)
+    assert ids is not None and isinstance(ids, list) and len(ids) == 0, \
+        f"ids should be empty array, got: {ids}"
+
+
+def test_email_query_stable_sort(jmap_client, query_test_data):
+    """Stable Sort Order (RFC 8620 Section 5.5)."""
+    response1 = jmap_client.request(EmailQuery())
+    error_type = getattr(response1, "type", None)
+    assert not error_type, f"JMAP error (call 1): {error_type}"
+    ids1 = getattr(response1, "ids", None) or []
+
+    response2 = jmap_client.request(EmailQuery())
+    error_type2 = getattr(response2, "type", None)
+    assert not error_type2, f"JMAP error (call 2): {error_type2}"
+    ids2 = getattr(response2, "ids", None) or []
+
+    assert ids1 == ids2, \
+        f"Call 1: {ids1[:5]}..., Call 2: {ids2[:5]}..."

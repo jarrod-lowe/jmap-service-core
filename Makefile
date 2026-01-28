@@ -148,10 +148,12 @@ scripts/.venv: scripts/jmap-client/requirements.txt
 	scripts/.venv/bin/pip install -q -r scripts/jmap-client/requirements.txt
 	@echo "Python venv created at scripts/.venv"
 
+PYTEST_ARGS ?=
+
 # Run JMAP protocol compliance tests using jmapc
 jmap-client-test: scripts/.venv
 	@echo "Running JMAP protocol compliance tests for $(ENV) environment..."
-	@./scripts/jmap-client-test.sh $(ENV)
+	@PYTEST_ARGS="$(PYTEST_ARGS)" ./scripts/jmap-client-test.sh $(ENV)
 
 # Run linter - MUST be installed
 # PATH includes ~/go/bin for go-installed tools
