@@ -12,6 +12,7 @@ from helpers import (
     create_test_mailbox,
     import_test_email,
     destroy_emails_and_verify_cleanup,
+    destroy_mailbox,
 )
 
 
@@ -40,6 +41,7 @@ class TestResultReferences:
         destroy_emails_and_verify_cleanup(
             api_url, token, account_id, email_ids
         )
+        destroy_mailbox(api_url, token, account_id, mailbox_id)
 
     def test_simple_result_reference(self, api_url, token, account_id, test_data):
         """

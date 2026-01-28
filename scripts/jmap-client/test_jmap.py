@@ -437,7 +437,7 @@ class TestBlobs:
 @pytest.fixture(scope="module")
 def query_test_data(jmap_client, api_url, upload_url, token, account_id):
     """Set up test data for Email/query tests: mailbox with 3 emails at staggered times."""
-    from helpers import create_test_mailbox, destroy_emails_and_verify_cleanup
+    from helpers import create_test_mailbox, destroy_emails_and_verify_cleanup, destroy_mailbox
     import time as _time
 
     mailbox_id = create_test_mailbox(api_url, token, account_id, prefix="QueryTest")
@@ -462,6 +462,7 @@ def query_test_data(jmap_client, api_url, upload_url, token, account_id):
 
     # Cleanup
     destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+    destroy_mailbox(api_url, token, account_id, mailbox_id)
 
 
 def test_email_query_response_structure(jmap_client, query_test_data):

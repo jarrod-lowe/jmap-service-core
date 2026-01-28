@@ -163,6 +163,34 @@ resource "aws_lambda_function" "blob_cleanup" {
   }
 }
 
+# SQS Dead Letter Queue for failed stream processing
+resource "aws_sqs_queue" "blob_cleanup_dlq" {
+  name                      = "${local.resource_prefix}-blob-cleanup-dlq-${var.environment}"
+  message_retention_seconds = 1209600 # 14 days
+
+  tags = {
+    Name        = "${local.resource_prefix}-blob-cleanup-dlq-${var.environment}"
+    Environment = var.environment
+    Service     = "jmap-service"
+    Function    = "blob-cleanup"
+  }
+}
+
+# IAM policy for SQS DLQ access
+data "aws_iam_policy_document" "blob_cleanup_sqs" {
+  statement {
+    effect    = "Allow"
+    actions   = ["sqs:SendMessage"]
+    resources = [aws_sqs_queue.blob_cleanup_dlq.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "blob_cleanup_sqs" {
+  name   = "${local.resource_prefix}-blob-cleanup-sqs-${var.environment}"
+  role   = aws_iam_role.blob_cleanup_execution.id
+  policy = data.aws_iam_policy_document.blob_cleanup_sqs.json
+}
+
 # DynamoDB Streams event source mapping
 resource "aws_lambda_event_source_mapping" "blob_cleanup_stream" {
   event_source_arn  = aws_dynamodb_table.jmap_data.stream_arn
@@ -172,6 +200,33 @@ resource "aws_lambda_event_source_mapping" "blob_cleanup_stream" {
 
   # Only retry failed batches for a limited time
   maximum_retry_attempts = 3
+
+  # Filter to only invoke for blob soft-delete transitions
+  filter_criteria {
+    filter {
+      pattern = jsonencode({
+        eventName = ["MODIFY"]
+        dynamodb = {
+          NewImage = {
+            deletedAt = { S = [{ "exists" = true }] }
+            sk        = { S = [{ "prefix" = "BLOB#" }] }
+          }
+          OldImage = {
+            deletedAt = [{ "exists" = false }]
+          }
+        }
+      })
+    }
+  }
+
+  # Send failed events to DLQ
+  destination_config {
+    on_failure {
+      destination_arn = aws_sqs_queue.blob_cleanup_dlq.arn
+    }
+  }
+
+  depends_on = [aws_iam_role_policy.blob_cleanup_sqs]
 
   tags = {
     Name        = "${local.resource_prefix}-blob-cleanup-stream-${var.environment}"
@@ -228,4 +283,28 @@ resource "aws_cloudwatch_log_anomaly_detector" "blob_cleanup_anomaly" {
   detector_name        = "${local.resource_prefix}-blob-cleanup-anomaly-${var.environment}"
   enabled              = true
   evaluation_frequency = "FIFTEEN_MIN"
+}
+
+# CloudWatch Alarm for blob-cleanup DLQ messages
+resource "aws_cloudwatch_metric_alarm" "blob_cleanup_dlq" {
+  alarm_name          = "${local.resource_prefix}-blob-cleanup-dlq-${var.environment}"
+  alarm_description   = "Alerts when blob-cleanup DLQ has messages (failed stream processing)"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  namespace           = "AWS/SQS"
+  period              = 300
+  statistic           = "Maximum"
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    QueueName = aws_sqs_queue.blob_cleanup_dlq.name
+  }
+
+  tags = {
+    Name        = "${local.resource_prefix}-blob-cleanup-dlq-${var.environment}"
+    Environment = var.environment
+    Service     = "jmap-service"
+  }
 }

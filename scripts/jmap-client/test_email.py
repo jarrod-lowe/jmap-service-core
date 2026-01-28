@@ -16,6 +16,7 @@ from helpers import (
     create_test_mailbox,
     upload_email_blob,
     destroy_emails_and_verify_cleanup,
+    destroy_mailbox,
 )
 
 
@@ -149,10 +150,13 @@ This is the test email body content for JMAP import verification.
 
         yield data
 
-        # Cleanup: destroy the test email
+        # Cleanup: destroy the test email and mailbox
         destroy_emails_and_verify_cleanup(
             api_url, token, account_id, [email_id],
         )
+        result = destroy_mailbox(api_url, token, account_id, mailbox_id, on_destroy_remove_emails=True)
+        assert result.get("methodName") == "Mailbox/set", f"Unexpected: {result}"
+        assert mailbox_id in result.get("destroyed", []), f"Mailbox not destroyed: {result}"
 
     def test_email_get_returned_email(self, test_data):
         assert test_data["email"] is not None
@@ -301,6 +305,9 @@ This is query test email number {i}.
         destroy_emails_and_verify_cleanup(
             api_url, token, account_id, email_ids,
         )
+        result = destroy_mailbox(api_url, token, account_id, mailbox_id, on_destroy_remove_emails=True)
+        assert result.get("methodName") == "Mailbox/set", f"Unexpected: {result}"
+        assert mailbox_id in result.get("destroyed", []), f"Mailbox not destroyed: {result}"
 
     def test_query_data_setup(self, query_data):
         """Verify test data was set up correctly."""

@@ -18,6 +18,7 @@ from helpers import (
     get_mailbox_state,
     get_thread_state,
     destroy_emails_and_verify_cleanup,
+    destroy_mailbox,
 )
 
 
@@ -33,6 +34,7 @@ class TestEmailChanges:
         yield mailbox_id, email_ids
         if email_ids:
             destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+        destroy_mailbox(api_url, token, account_id, mailbox_id, on_destroy_remove_emails=True)
 
     def test_response_structure(self, api_url, token, account_id):
         """Email/changes response has all required fields (RFC 8620 Section 5.2)."""
@@ -295,6 +297,8 @@ class TestMailboxChanges:
             f"State did not change after create (still {initial_state[:16]}...)"
         )
 
+        destroy_mailbox(api_url, token, account_id, mailbox_id)
+
     def test_returns_created_mailbox(self, api_url, token, account_id):
         """Mailbox/changes returns newly created mailbox in created array (RFC 8620 Section 5.2)."""
         initial_state = get_mailbox_state(api_url, token, account_id)
@@ -323,6 +327,8 @@ class TestMailboxChanges:
 
         created = response_data.get("created", [])
         assert mailbox_id in created, f"mailboxId {mailbox_id} not in created: {created}"
+
+        destroy_mailbox(api_url, token, account_id, mailbox_id)
 
     def test_invalid_state_returns_error(self, api_url, token, account_id):
         """Mailbox/changes returns cannotCalculateChanges for invalid sinceState (RFC 8620 Section 5.2)."""
@@ -357,6 +363,7 @@ class TestThreadChanges:
         yield mailbox_id, email_ids
         if email_ids:
             destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+        destroy_mailbox(api_url, token, account_id, mailbox_id, on_destroy_remove_emails=True)
 
     def test_response_structure(self, api_url, token, account_id):
         """Thread/changes response has all required fields (RFC 8620 Section 5.2)."""

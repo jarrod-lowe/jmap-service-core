@@ -514,6 +514,38 @@ def thread_get(
     return response_data
 
 
+def destroy_mailbox(
+    api_url: str,
+    token: str,
+    account_id: str,
+    mailbox_id: str,
+    on_destroy_remove_emails: bool = False,
+) -> dict:
+    """
+    Destroy a mailbox via Mailbox/set destroy.
+
+    Returns the full JMAP response data from Mailbox/set.
+    """
+    mailbox_set_call = [
+        "Mailbox/set",
+        {
+            "accountId": account_id,
+            "destroy": [mailbox_id],
+            "onDestroyRemoveEmails": on_destroy_remove_emails,
+        },
+        "destroyMailbox0",
+    ]
+
+    response = make_jmap_request(api_url, token, [mailbox_set_call])
+    assert "methodResponses" in response, f"No methodResponses: {response}"
+
+    method_responses = response["methodResponses"]
+    assert len(method_responses) > 0, "Empty methodResponses"
+
+    response_name, response_data, _ = method_responses[0]
+    return {"methodName": response_name, **response_data}
+
+
 def destroy_emails_and_verify_cleanup(
     api_url: str,
     token: str,

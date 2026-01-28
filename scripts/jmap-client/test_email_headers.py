@@ -15,6 +15,7 @@ from helpers import (
     create_test_mailbox,
     upload_email_blob,
     destroy_emails_and_verify_cleanup,
+    destroy_mailbox,
 )
 
 
@@ -140,6 +141,7 @@ This is the test email body for header property testing.
         destroy_emails_and_verify_cleanup(
             api_url, token, account_id, [email_id]
         )
+        destroy_mailbox(api_url, token, account_id, mailbox_id, on_destroy_remove_emails=True)
 
     def test_raw_header_form(self, api_url, token, account_id, header_test_email):
         """

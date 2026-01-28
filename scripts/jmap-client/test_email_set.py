@@ -16,6 +16,7 @@ from helpers import (
     get_email_mailbox_ids,
     get_email_keywords,
     destroy_emails_and_verify_cleanup,
+    destroy_mailbox,
 )
 
 
@@ -33,6 +34,8 @@ class TestMailboxChanges:
         RFC 8621 Section 4.6: mailboxIds is updatable.
         """
         email_ids = []
+        mailbox_a = None
+        mailbox_b = None
         try:
             mailbox_a = create_test_mailbox(api_url, token, account_id)
             assert mailbox_a, "Failed to create mailbox A"
@@ -79,6 +82,9 @@ class TestMailboxChanges:
         finally:
             if email_ids:
                 destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+            for mb_id in [mailbox_a, mailbox_b]:
+                if mb_id:
+                    destroy_mailbox(api_url, token, account_id, mb_id)
 
     def test_add_email_to_additional_mailbox(self, api_url, upload_url, token, account_id):
         """
@@ -87,6 +93,8 @@ class TestMailboxChanges:
         RFC 8620 Section 5.3: Use "mailboxIds/newId": true to add.
         """
         email_ids = []
+        mailbox_a = None
+        mailbox_b = None
         try:
             mailbox_a = create_test_mailbox(api_url, token, account_id)
             assert mailbox_a, "Failed to create mailbox A"
@@ -133,6 +141,9 @@ class TestMailboxChanges:
         finally:
             if email_ids:
                 destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+            for mb_id in [mailbox_a, mailbox_b]:
+                if mb_id:
+                    destroy_mailbox(api_url, token, account_id, mb_id)
 
     def test_remove_email_from_one_mailbox(self, api_url, upload_url, token, account_id):
         """
@@ -141,6 +152,8 @@ class TestMailboxChanges:
         RFC 8620 Section 5.3: Use "mailboxIds/oldId": null to remove.
         """
         email_ids = []
+        mailbox_a = None
+        mailbox_b = None
         try:
             mailbox_a = create_test_mailbox(api_url, token, account_id)
             assert mailbox_a, "Failed to create mailbox A"
@@ -195,6 +208,9 @@ class TestMailboxChanges:
         finally:
             if email_ids:
                 destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+            for mb_id in [mailbox_a, mailbox_b]:
+                if mb_id:
+                    destroy_mailbox(api_url, token, account_id, mb_id)
 
     def test_remove_all_mailboxes_error(self, api_url, upload_url, token, account_id):
         """
@@ -203,6 +219,7 @@ class TestMailboxChanges:
         RFC 8621 Section 4.6: Email MUST be in at least one mailbox.
         """
         email_ids = []
+        mailbox_id = None
         try:
             mailbox_id = create_test_mailbox(api_url, token, account_id)
             assert mailbox_id, "Failed to create mailbox"
@@ -240,6 +257,8 @@ class TestMailboxChanges:
         finally:
             if email_ids:
                 destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+            if mailbox_id:
+                destroy_mailbox(api_url, token, account_id, mailbox_id)
 
 
 # =============================================================================
@@ -256,6 +275,8 @@ class TestCounterUpdates:
         RFC 8621 Section 2: totalEmails is the count of emails in mailbox.
         """
         email_ids = []
+        mailbox_a = None
+        mailbox_b = None
         try:
             mailbox_a = create_test_mailbox(api_url, token, account_id)
             assert mailbox_a, "Failed to create mailbox A"
@@ -287,6 +308,9 @@ class TestCounterUpdates:
         finally:
             if email_ids:
                 destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+            for mb_id in [mailbox_a, mailbox_b]:
+                if mb_id:
+                    destroy_mailbox(api_url, token, account_id, mb_id)
 
     def test_total_emails_decrement_on_remove(self, api_url, upload_url, token, account_id):
         """
@@ -295,6 +319,8 @@ class TestCounterUpdates:
         RFC 8621 Section 2: totalEmails is the count of emails in mailbox.
         """
         email_ids = []
+        mailbox_a = None
+        mailbox_b = None
         try:
             mailbox_a = create_test_mailbox(api_url, token, account_id)
             assert mailbox_a, "Failed to create mailbox A"
@@ -335,6 +361,9 @@ class TestCounterUpdates:
         finally:
             if email_ids:
                 destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+            for mb_id in [mailbox_a, mailbox_b]:
+                if mb_id:
+                    destroy_mailbox(api_url, token, account_id, mb_id)
 
     def test_unread_emails_update_on_move(self, api_url, upload_url, token, account_id):
         """
@@ -343,6 +372,8 @@ class TestCounterUpdates:
         RFC 8621 Section 2: unreadEmails counts emails without $seen keyword.
         """
         email_ids = []
+        mailbox_a = None
+        mailbox_b = None
         try:
             mailbox_a = create_test_mailbox(api_url, token, account_id)
             assert mailbox_a, "Failed to create mailbox A"
@@ -391,6 +422,9 @@ class TestCounterUpdates:
         finally:
             if email_ids:
                 destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+            for mb_id in [mailbox_a, mailbox_b]:
+                if mb_id:
+                    destroy_mailbox(api_url, token, account_id, mb_id)
 
     def test_read_email_no_unread_change(self, api_url, upload_url, token, account_id):
         """
@@ -399,6 +433,8 @@ class TestCounterUpdates:
         RFC 8621 Section 2: unreadEmails excludes emails with $seen keyword.
         """
         email_ids = []
+        mailbox_a = None
+        mailbox_b = None
         try:
             mailbox_a = create_test_mailbox(api_url, token, account_id)
             assert mailbox_a, "Failed to create mailbox A"
@@ -448,6 +484,9 @@ class TestCounterUpdates:
         finally:
             if email_ids:
                 destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+            for mb_id in [mailbox_a, mailbox_b]:
+                if mb_id:
+                    destroy_mailbox(api_url, token, account_id, mb_id)
 
 
 # =============================================================================
@@ -464,6 +503,8 @@ class TestStateTracking:
         RFC 8620 Section 5.3: /set response MUST include oldState and newState.
         """
         email_ids = []
+        mailbox_a = None
+        mailbox_b = None
         try:
             mailbox_a = create_test_mailbox(api_url, token, account_id)
             mailbox_b = create_test_mailbox(api_url, token, account_id)
@@ -498,6 +539,9 @@ class TestStateTracking:
         finally:
             if email_ids:
                 destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+            for mb_id in [mailbox_a, mailbox_b]:
+                if mb_id:
+                    destroy_mailbox(api_url, token, account_id, mb_id)
 
     def test_new_state_differs_after_update(self, api_url, upload_url, token, account_id):
         """
@@ -506,6 +550,8 @@ class TestStateTracking:
         RFC 8620 Section 5.3: State MUST change when data changes.
         """
         email_ids = []
+        mailbox_a = None
+        mailbox_b = None
         try:
             mailbox_a = create_test_mailbox(api_url, token, account_id)
             mailbox_b = create_test_mailbox(api_url, token, account_id)
@@ -540,6 +586,9 @@ class TestStateTracking:
         finally:
             if email_ids:
                 destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+            for mb_id in [mailbox_a, mailbox_b]:
+                if mb_id:
+                    destroy_mailbox(api_url, token, account_id, mb_id)
 
     def test_if_in_state_success(self, api_url, upload_url, token, account_id):
         """
@@ -548,6 +597,8 @@ class TestStateTracking:
         RFC 8620 Section 5.3: ifInState is a precondition check.
         """
         email_ids = []
+        mailbox_a = None
+        mailbox_b = None
         try:
             mailbox_a = create_test_mailbox(api_url, token, account_id)
             mailbox_b = create_test_mailbox(api_url, token, account_id)
@@ -591,6 +642,9 @@ class TestStateTracking:
         finally:
             if email_ids:
                 destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+            for mb_id in [mailbox_a, mailbox_b]:
+                if mb_id:
+                    destroy_mailbox(api_url, token, account_id, mb_id)
 
     def test_if_in_state_mismatch_error(self, api_url, upload_url, token, account_id):
         """
@@ -599,6 +653,8 @@ class TestStateTracking:
         RFC 8620 Section 5.3: If state doesn't match, return stateMismatch error.
         """
         email_ids = []
+        mailbox_a = None
+        mailbox_b = None
         try:
             mailbox_a = create_test_mailbox(api_url, token, account_id)
             mailbox_b = create_test_mailbox(api_url, token, account_id)
@@ -631,6 +687,9 @@ class TestStateTracking:
         finally:
             if email_ids:
                 destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+            for mb_id in [mailbox_a, mailbox_b]:
+                if mb_id:
+                    destroy_mailbox(api_url, token, account_id, mb_id)
 
     def test_new_state_matches_subsequent_get(self, api_url, upload_url, token, account_id):
         """
@@ -639,6 +698,8 @@ class TestStateTracking:
         RFC 8620 Section 5.3: States must be consistent across methods.
         """
         email_ids = []
+        mailbox_a = None
+        mailbox_b = None
         try:
             mailbox_a = create_test_mailbox(api_url, token, account_id)
             mailbox_b = create_test_mailbox(api_url, token, account_id)
@@ -675,6 +736,9 @@ class TestStateTracking:
         finally:
             if email_ids:
                 destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+            for mb_id in [mailbox_a, mailbox_b]:
+                if mb_id:
+                    destroy_mailbox(api_url, token, account_id, mb_id)
 
     def test_mailbox_state_changes_on_email_update(self, api_url, upload_url, token, account_id):
         """
@@ -683,6 +747,8 @@ class TestStateTracking:
         RFC 8621 Section 2: Mailbox counters are part of mailbox state.
         """
         email_ids = []
+        mailbox_a = None
+        mailbox_b = None
         try:
             mailbox_a = create_test_mailbox(api_url, token, account_id)
             mailbox_b = create_test_mailbox(api_url, token, account_id)
@@ -710,6 +776,9 @@ class TestStateTracking:
         finally:
             if email_ids:
                 destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+            for mb_id in [mailbox_a, mailbox_b]:
+                if mb_id:
+                    destroy_mailbox(api_url, token, account_id, mb_id)
 
 
 # =============================================================================
@@ -727,6 +796,7 @@ class TestKeywordUpdates:
         RFC 8621 Section 4.4: keywords is updatable.
         """
         email_ids = []
+        mailbox_id = None
         try:
             mailbox_id = create_test_mailbox(api_url, token, account_id)
             assert mailbox_id, "Failed to create mailbox"
@@ -786,6 +856,8 @@ class TestKeywordUpdates:
         finally:
             if email_ids:
                 destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+            if mailbox_id:
+                destroy_mailbox(api_url, token, account_id, mailbox_id)
 
     def test_remove_seen_keyword_increases_unread(self, api_url, upload_url, token, account_id):
         """
@@ -795,6 +867,7 @@ class TestKeywordUpdates:
         RFC 8620 Section 5.3: Use patch "keywords/$seen": null to remove.
         """
         email_ids = []
+        mailbox_id = None
         try:
             mailbox_id = create_test_mailbox(api_url, token, account_id)
             assert mailbox_id, "Failed to create mailbox"
@@ -858,6 +931,8 @@ class TestKeywordUpdates:
         finally:
             if email_ids:
                 destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+            if mailbox_id:
+                destroy_mailbox(api_url, token, account_id, mailbox_id)
 
     def test_set_keywords_via_full_replacement(self, api_url, upload_url, token, account_id):
         """
@@ -866,6 +941,7 @@ class TestKeywordUpdates:
         RFC 8621 Section 4.4: keywords is updatable as a full map replacement.
         """
         email_ids = []
+        mailbox_id = None
         try:
             mailbox_id = create_test_mailbox(api_url, token, account_id)
             assert mailbox_id, "Failed to create mailbox"
@@ -928,6 +1004,8 @@ class TestKeywordUpdates:
         finally:
             if email_ids:
                 destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+            if mailbox_id:
+                destroy_mailbox(api_url, token, account_id, mailbox_id)
 
     def test_add_non_unread_keyword_no_counter_change(self, api_url, upload_url, token, account_id):
         """
@@ -936,6 +1014,7 @@ class TestKeywordUpdates:
         RFC 8621 Section 2: Only $seen affects unreadEmails count.
         """
         email_ids = []
+        mailbox_id = None
         try:
             mailbox_id = create_test_mailbox(api_url, token, account_id)
             assert mailbox_id, "Failed to create mailbox"
@@ -995,6 +1074,8 @@ class TestKeywordUpdates:
         finally:
             if email_ids:
                 destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+            if mailbox_id:
+                destroy_mailbox(api_url, token, account_id, mailbox_id)
 
     def test_email_state_changes_on_keyword_update(self, api_url, upload_url, token, account_id):
         """
@@ -1003,6 +1084,7 @@ class TestKeywordUpdates:
         RFC 8620 Section 5.3: State MUST change when data changes.
         """
         email_ids = []
+        mailbox_id = None
         try:
             mailbox_id = create_test_mailbox(api_url, token, account_id)
             assert mailbox_id, "Failed to create mailbox"
@@ -1045,6 +1127,8 @@ class TestKeywordUpdates:
         finally:
             if email_ids:
                 destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+            if mailbox_id:
+                destroy_mailbox(api_url, token, account_id, mailbox_id)
 
     def test_mailbox_state_changes_on_seen_keyword_update(self, api_url, upload_url, token, account_id):
         """
@@ -1053,6 +1137,7 @@ class TestKeywordUpdates:
         RFC 8621 Section 2: Mailbox counters are part of mailbox state.
         """
         email_ids = []
+        mailbox_id = None
         try:
             mailbox_id = create_test_mailbox(api_url, token, account_id)
             assert mailbox_id, "Failed to create mailbox"
@@ -1091,6 +1176,8 @@ class TestKeywordUpdates:
         finally:
             if email_ids:
                 destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+            if mailbox_id:
+                destroy_mailbox(api_url, token, account_id, mailbox_id)
 
 
 # =============================================================================
@@ -1107,6 +1194,7 @@ class TestInvalidPatches:
         RFC 8620 Section 5.3: Invalid patch paths must be rejected.
         """
         email_ids = []
+        mailbox_id = None
         try:
             mailbox_id = create_test_mailbox(api_url, token, account_id)
             assert mailbox_id, "Failed to create mailbox"
@@ -1144,6 +1232,8 @@ class TestInvalidPatches:
         finally:
             if email_ids:
                 destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+            if mailbox_id:
+                destroy_mailbox(api_url, token, account_id, mailbox_id)
 
     def test_invalid_patch_nested_non_existent_path(self, api_url, upload_url, token, account_id):
         """
@@ -1153,6 +1243,7 @@ class TestInvalidPatches:
         on the object being patched."
         """
         email_ids = []
+        mailbox_id = None
         try:
             mailbox_id = create_test_mailbox(api_url, token, account_id)
             assert mailbox_id, "Failed to create mailbox"
@@ -1190,6 +1281,8 @@ class TestInvalidPatches:
         finally:
             if email_ids:
                 destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+            if mailbox_id:
+                destroy_mailbox(api_url, token, account_id, mailbox_id)
 
     def test_invalid_patch_immutable_property(self, api_url, upload_url, token, account_id):
         """
@@ -1199,6 +1292,7 @@ class TestInvalidPatches:
         cannot be modified after creation.
         """
         email_ids = []
+        mailbox_id = None
         try:
             mailbox_id = create_test_mailbox(api_url, token, account_id)
             assert mailbox_id, "Failed to create mailbox"
@@ -1236,3 +1330,5 @@ class TestInvalidPatches:
         finally:
             if email_ids:
                 destroy_emails_and_verify_cleanup(api_url, token, account_id, email_ids)
+            if mailbox_id:
+                destroy_mailbox(api_url, token, account_id, mailbox_id)
