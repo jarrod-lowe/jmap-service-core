@@ -160,3 +160,27 @@ variable "cors_allowed_origins" {
   type        = list(string)
   default     = ["*"]
 }
+
+# CloudWatch Alarm Configuration
+
+variable "alarm_sns_topic_arn" {
+  description = "SNS topic ARN for alarm notifications"
+  type        = string
+}
+
+variable "anomaly_detection_enabled" {
+  description = "Enable CloudWatch anomaly detection"
+  type        = bool
+  default     = true
+}
+
+variable "anomaly_detection_evaluation_frequency" {
+  description = "Anomaly detection evaluation frequency in seconds"
+  type        = number
+  default     = 900 # 15 minutes
+
+  validation {
+    condition     = contains([300, 900, 1800, 3600], var.anomaly_detection_evaluation_frequency)
+    error_message = "Must be 300 (5min), 900 (15min), 1800 (30min), or 3600 (1hr)"
+  }
+}

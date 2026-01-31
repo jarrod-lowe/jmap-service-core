@@ -42,6 +42,9 @@ resource "aws_cloudwatch_metric_alarm" "get_jmap_session_errors" {
     FunctionName = aws_lambda_function.get_jmap_session.function_name
   }
 
+  alarm_actions = [var.alarm_sns_topic_arn]
+  ok_actions    = [var.alarm_sns_topic_arn]
+
   tags = {
     Name        = "${local.resource_prefix}-get-jmap-session-errors-${var.environment}"
     Environment = var.environment
@@ -53,8 +56,8 @@ resource "aws_cloudwatch_metric_alarm" "get_jmap_session_errors" {
 resource "aws_cloudwatch_log_anomaly_detector" "get_jmap_session_anomaly" {
   log_group_arn_list   = [aws_cloudwatch_log_group.get_jmap_session_logs.arn]
   detector_name        = "${local.resource_prefix}-get-jmap-session-anomaly-${var.environment}"
-  enabled              = true
-  evaluation_frequency = "FIFTEEN_MIN"
+  enabled              = var.anomaly_detection_enabled
+  evaluation_frequency = local.anomaly_evaluation_frequency
 }
 
 # =============================================================================
@@ -105,6 +108,9 @@ resource "aws_cloudwatch_metric_alarm" "jmap_api_errors" {
     FunctionName = aws_lambda_function.jmap_api.function_name
   }
 
+  alarm_actions = [var.alarm_sns_topic_arn]
+  ok_actions    = [var.alarm_sns_topic_arn]
+
   tags = {
     Name        = "${local.resource_prefix}-jmap-api-errors-${var.environment}"
     Environment = var.environment
@@ -116,6 +122,6 @@ resource "aws_cloudwatch_metric_alarm" "jmap_api_errors" {
 resource "aws_cloudwatch_log_anomaly_detector" "jmap_api_anomaly" {
   log_group_arn_list   = [aws_cloudwatch_log_group.jmap_api_logs.arn]
   detector_name        = "${local.resource_prefix}-jmap-api-anomaly-${var.environment}"
-  enabled              = true
-  evaluation_frequency = "FIFTEEN_MIN"
+  enabled              = var.anomaly_detection_enabled
+  evaluation_frequency = local.anomaly_evaluation_frequency
 }

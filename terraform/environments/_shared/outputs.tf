@@ -112,3 +112,20 @@ output "dynamodb_table_name" {
   description = "Name of the DynamoDB table"
   value       = module.jmap_service.dynamodb_table_name
 }
+
+# CloudWatch Dashboard outputs
+output "dashboard_url" {
+  description = "URL to the CloudWatch dashboard"
+  value       = module.jmap_service.dashboard_url
+}
+
+# Resource Group outputs
+output "resource_group_name" {
+  description = "Name of the AWS Resource Group"
+  value       = module.jmap_service.resource_group_name
+}
+
+output "resource_group_url" {
+  description = "URL to view the Resource Group in AWS Console"
+  value       = module.jmap_service.resource_group_url
+}

@@ -59,3 +59,8 @@ variable "cloudfront_signing_key_max_age_days" {
   type        = number
   default     = 180
 }
+
+variable "alarm_sns_topic_arn" {
+  description = "SNS topic ARN for alarm notifications"
+  type        = string
+}

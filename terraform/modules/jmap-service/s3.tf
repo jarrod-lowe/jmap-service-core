@@ -82,6 +82,12 @@ resource "aws_s3_bucket_cors_configuration" "blobs" {
   }
 }
 
+# Request metrics for CloudWatch dashboard
+resource "aws_s3_bucket_metric" "blobs_all_requests" {
+  bucket = aws_s3_bucket.blobs.bucket
+  name   = "AllRequests"
+}
+
 # Lifecycle rules for blob management
 resource "aws_s3_bucket_lifecycle_configuration" "blobs" {
   bucket     = aws_s3_bucket.blobs.id

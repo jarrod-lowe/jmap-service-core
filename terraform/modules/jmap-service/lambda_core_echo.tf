@@ -149,6 +149,9 @@ resource "aws_cloudwatch_metric_alarm" "core_echo_errors" {
     FunctionName = aws_lambda_function.core_echo.function_name
   }
 
+  alarm_actions = [var.alarm_sns_topic_arn]
+  ok_actions    = [var.alarm_sns_topic_arn]
+
   tags = {
     Name        = "${local.resource_prefix}-core-echo-errors-${var.environment}"
     Environment = var.environment
@@ -160,6 +163,6 @@ resource "aws_cloudwatch_metric_alarm" "core_echo_errors" {
 resource "aws_cloudwatch_log_anomaly_detector" "core_echo_anomaly" {
   log_group_arn_list   = [aws_cloudwatch_log_group.core_echo_logs.arn]
   detector_name        = "${local.resource_prefix}-core-echo-anomaly-${var.environment}"
-  enabled              = true
-  evaluation_frequency = "FIFTEEN_MIN"
+  enabled              = var.anomaly_detection_enabled
+  evaluation_frequency = local.anomaly_evaluation_frequency
 }

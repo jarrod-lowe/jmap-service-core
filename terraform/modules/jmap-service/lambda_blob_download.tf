@@ -200,6 +200,9 @@ resource "aws_cloudwatch_metric_alarm" "blob_download_errors" {
     FunctionName = aws_lambda_function.blob_download.function_name
   }
 
+  alarm_actions = [var.alarm_sns_topic_arn]
+  ok_actions    = [var.alarm_sns_topic_arn]
+
   tags = {
     Name        = "${local.resource_prefix}-blob-download-errors-${var.environment}"
     Environment = var.environment
@@ -211,6 +214,6 @@ resource "aws_cloudwatch_metric_alarm" "blob_download_errors" {
 resource "aws_cloudwatch_log_anomaly_detector" "blob_download_anomaly" {
   log_group_arn_list   = [aws_cloudwatch_log_group.blob_download_logs.arn]
   detector_name        = "${local.resource_prefix}-blob-download-anomaly-${var.environment}"
-  enabled              = true
-  evaluation_frequency = "FIFTEEN_MIN"
+  enabled              = var.anomaly_detection_enabled
+  evaluation_frequency = local.anomaly_evaluation_frequency
 }
