@@ -4,3 +4,4 @@ pyyaml
 boto3
 pytest
 pytest-xdist
+xml2rfc

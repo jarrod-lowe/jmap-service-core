@@ -1,4 +1,4 @@
-.PHONY: help deps build build-all package package-all test test-go test-cloudfront integration-test jmap-client-test lint init plan show-plan apply plan-destroy destroy clean clean-all fmt validate outputs restore-tfvars help-tfvars invalidate-cache get-token
+.PHONY: help deps build build-all package package-all test test-go test-cloudfront integration-test jmap-client-test lint init plan show-plan apply plan-destroy destroy clean clean-all fmt validate outputs restore-tfvars help-tfvars invalidate-cache get-token docs
 
 # Environment selection (test or prod)
 ENV ?= test
@@ -50,6 +50,7 @@ help:
 	@echo "  make integration-test ENV=<env> - Run integration tests against deployed env"
 	@echo "  make jmap-client-test ENV=<env> - Run JMAP protocol compliance tests (jmapc)"
 	@echo "  make get-token ENV=<env>     - Get Cognito JWT token for test user"
+	@echo "  make docs                    - Render extension docs (xml2rfc to text)"
 	@echo "  make lint                    - Run golangci-lint (required)"
 	@echo ""
 	@echo "Terraform Commands:"
@@ -150,6 +151,17 @@ scripts/.venv: scripts/jmap-client/requirements.txt
 
 PYTEST_ARGS ?=
 
+# Render extension docs from xml2rfc XML to plain text
+EXTENSION_XMLS := $(wildcard docs/extensions/*.xml)
+EXTENSION_TXTS := $(patsubst docs/extensions/%.xml,$(BUILD_DIR)/docs/%.txt,$(EXTENSION_XMLS))
+
+$(BUILD_DIR)/docs/%.txt: docs/extensions/%.xml scripts/.venv
+	@echo "Rendering extension doc: $<"
+	@mkdir -p $(BUILD_DIR)/docs
+	scripts/.venv/bin/xml2rfc --text --out $@ $<
+
+docs: $(EXTENSION_TXTS)
+
 # Run JMAP protocol compliance tests using jmapc
 jmap-client-test: scripts/.venv
 	@echo "Running JMAP protocol compliance tests for $(ENV) environment..."
@@ -194,7 +206,7 @@ $(ENV_DIR)/.terraform: $(MODULE_DIR)/scripts/ensure-state-bucket.sh $(TF_FILES)
 init: $(ENV_DIR)/.terraform
 
 # Create plan file - depends on all lambda zips and formatted terraform
-$(ENV_DIR)/terraform.plan: $(ENV_DIR)/.terraform $(ENV_DIR)/*.tf $(MODULE_DIR)/*.tf $(LAMBDA_ZIPS) terraform/.fmt
+$(ENV_DIR)/terraform.plan: $(ENV_DIR)/.terraform $(ENV_DIR)/*.tf $(MODULE_DIR)/*.tf $(LAMBDA_ZIPS) $(EXTENSION_TXTS) terraform/.fmt
 	@echo "Creating Terraform plan for $(ENV) environment..."
 	cd $(ENV_DIR) && terraform plan -out=terraform.plan
 	@echo "Plan created: $(ENV_DIR)/terraform.plan"

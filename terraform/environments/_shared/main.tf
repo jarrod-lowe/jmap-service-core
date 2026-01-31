@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.0"
+  required_version = ">= 1.14"
 
   backend "s3" {
     # Bucket name is set via -backend-config in Makefile

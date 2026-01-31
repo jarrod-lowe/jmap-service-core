@@ -99,6 +99,11 @@ resource "aws_cloudfront_distribution" "api" {
   http_version    = "http2and3"
   is_ipv6_enabled = true
 
+  # web_acl_id is managed by CloudFront's pricing plan - don't let Terraform touch it
+  lifecycle {
+    ignore_changes = [web_acl_id]
+  }
+
   # API Gateway origin
   origin {
     domain_name = "${aws_api_gateway_rest_api.api.id}.execute-api.${var.aws_region}.amazonaws.com"
@@ -118,6 +123,24 @@ resource "aws_cloudfront_distribution" "api" {
     domain_name              = aws_s3_bucket.blobs.bucket_regional_domain_name
     origin_id                = "s3-blobs"
     origin_access_control_id = aws_cloudfront_origin_access_control.blobs.id
+  }
+
+  # S3 origin for static documentation
+  origin {
+    domain_name              = aws_s3_bucket.static_docs.bucket_regional_domain_name
+    origin_id                = "s3-static-docs"
+    origin_access_control_id = aws_cloudfront_origin_access_control.static_docs.id
+  }
+
+  # Static documentation - publicly accessible, cached at edge
+  ordered_cache_behavior {
+    path_pattern           = "/extensions/*"
+    target_origin_id       = "s3-static-docs"
+    viewer_protocol_policy = "redirect-to-https"
+    allowed_methods        = ["GET", "HEAD"]
+    cached_methods         = ["GET", "HEAD"]
+    compress               = true
+    cache_policy_id        = data.aws_cloudfront_cache_policy.caching_optimized.id
   }
 
   # Blob download path - requires signed URL

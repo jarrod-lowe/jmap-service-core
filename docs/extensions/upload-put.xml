@@ -1,0 +1,971 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!DOCTYPE rfc [
+  <!ENTITY nbsp "&#160;">
+]>
+
+<?xml-stylesheet type="text/xsl" href="rfc2629.xslt"?>
+
+<!-- category="exp" (Experimental): This document defines a new protocol
+     mechanism intended for implementation and testing. "info" would be
+     appropriate if merely documenting existing practice. Final category
+     to be determined upon actual submission to IETF. -->
+<rfc xmlns:xi="http://www.w3.org/2001/XInclude"
+     docName="draft-lowe-jmap-upload-put-00"
+     category="exp"
+     ipr="trust200902"
+     submissionType="independent"
+     version="3">
+
+  <front>
+    <title abbrev="JMAP Direct Upload">JMAP Direct Upload Extension</title>
+    <seriesInfo name="Internet-Draft" value="draft-lowe-jmap-upload-put-00"/>
+
+    <author fullname="Jarrod Lowe" initials="J." surname="Lowe">
+      <organization/>
+      <address>
+        <email>draft-lowe-jmap-upload-put-00@rrod.net</email>
+      </address>
+    </author>
+
+    <date year="2026" month="January" day="30"/>
+
+    <!-- workgroup element omitted: this is an independent submission,
+         not IETF working group output -->
+
+    <!-- area element omitted: ART is an IETF-stream concept with no
+         formal meaning for submissionType="independent" -->
+
+    <abstract>
+      <t>
+        The JMAP base protocol (<xref target="RFC8620"/>) defines a binary
+        data upload mechanism using HTTP POST to a single upload endpoint.
+        This extension adds a JMAP method, <tt>Blob/allocate</tt>, that
+        returns a pre-authorized URL to which the client may PUT binary data
+        directly. This bypasses JMAP API endpoint payload limitations,
+        enabling servers to support upload sizes beyond what their API
+        infrastructure can receive.
+      </t>
+    </abstract>
+  </front>
+
+  <middle>
+
+    <section anchor="introduction">
+      <name>Introduction</name>
+      <t>
+        <xref target="RFC8620"/> Section 6.1 specifies that clients upload
+        binary data by submitting an authenticated HTTP POST request to the
+        upload endpoint. The server receives the full payload, stores it,
+        and returns a JSON response containing the blob metadata.
+      </t>
+      <t>
+        This works well when the API server can receive the full upload
+        payload. However, serverless and edge-compute architectures often
+        impose request payload size limits significantly below the
+        50,000,000 octets that <xref target="RFC8620"/> specifies servers
+        SHOULD support for <tt>maxSizeUpload</tt>.
+      </t>
+      <t>
+        <xref target="RFC9404"/> (JMAP Blob Management) defines
+        <tt>Blob/upload</tt> for uploading binary data inline within a JMAP
+        request. While useful for small blobs, inline upload does not bypass
+        API payload limits because the blob data is encoded within the JMAP
+        request body itself.
+      </t>
+      <t>This extension defines a two-step upload mechanism:</t>
+      <ol>
+        <li>
+          The client calls <tt>Blob/allocate</tt> via the standard JMAP API
+          endpoint to reserve a blob identifier and obtain a time-limited,
+          pre-authorized URL for PUT upload.
+        </li>
+        <li>
+          The client PUTs the binary data to the provided URL.
+        </li>
+      </ol>
+      <t>
+        The PUT upload bypasses the JMAP API endpoint, avoiding its payload
+        limitations.
+      </t>
+      <t>
+        This extension defines single-request uploads only. Multipart or
+        chunked upload mechanisms (e.g. using multiple HTTP requests for a
+        single blob) are out of scope and may be addressed by a future
+        extension.
+      </t>
+      <t>
+        To use this extension, the client MUST include the capability
+        identifier in the <tt>using</tt> array of the JMAP Request object,
+        as required by <xref target="RFC8620"/> Section 1.8. The client
+        MUST also include <tt>urn:ietf:params:jmap:core</tt> as required
+        for all JMAP requests.
+      </t>
+    </section>
+
+    <section anchor="conventions">
+      <name>Conventions</name>
+      <t>
+        The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+        "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+        document are to be interpreted as described in BCP 14
+        <xref target="RFC2119"/> <xref target="RFC8174"/> when, and only
+        when, they appear in all capitals, as shown here.
+      </t>
+
+      <section anchor="terminology">
+        <name>Terminology</name>
+        <t>This document introduces the following terms:</t>
+        <dl>
+          <dt>Allocation</dt>
+          <dd>
+            A reservation created by the <tt>Blob/allocate</tt> method that
+            assigns a blob identifier (<tt>id</tt>) and generates a
+            pre-authorized URL for upload. An allocation is pending until
+            the corresponding upload completes successfully, at which point
+            the <tt>id</tt> becomes usable in other JMAP methods.
+          </dd>
+
+          <dt>Pending blob</dt>
+          <dd>
+            An <tt>id</tt> that has been allocated but whose binary data
+            has not yet been uploaded. A pending blob is not part of the
+            account's blob store and MUST NOT be discoverable through other
+            JMAP methods. See <xref target="allocation-expiry"/> for
+            lifecycle details.
+          </dd>
+
+          <dt>Pre-authorized URL</dt>
+          <dd>
+            A time-limited URL (<xref target="RFC3986"/>) returned by
+            <tt>Blob/allocate</tt> that grants upload access without further
+            JMAP authentication. The URL contains embedded credentials scoped
+            to a specific blob and account. See <xref target="url-security"/>
+            for security requirements.
+          </dd>
+        </dl>
+      </section>
+    </section>
+
+    <section anchor="capability">
+      <name>Capability</name>
+
+      <section anchor="capability-id">
+        <name>Capability Identifier</name>
+        <t>The capability identifier for this extension is:</t>
+        <artwork><![CDATA[
+https://jmap.rrod.net/extensions/upload-put
+]]></artwork>
+        <t>
+          This identifier follows the vendor extension pattern defined in
+          <xref target="RFC8620"/> Section 1.8, using a URL under a domain
+          owned by the extension author.
+        </t>
+        <t>
+          This vendor URL is temporary. Should this extension be adopted
+          as an IETF specification, the capability identifier would be
+          replaced with <tt>urn:ietf:params:jmap:directupload</tt>.
+        </t>
+      </section>
+
+      <section anchor="session-capability">
+        <name>Session Capability</name>
+        <t>
+          The value of this property in the session capabilities object MUST
+          be an empty JSON object <tt>{}</tt>. Its presence indicates that the
+          server supports this extension; per-account limits are defined in
+          the account capability (<xref target="account-capability"/>).
+        </t>
+      </section>
+
+      <section anchor="account-capability">
+        <name>Account Capability</name>
+        <t>
+          Servers MUST include this capability in the
+          <tt>accountCapabilities</tt> of each account that supports the
+          <tt>Blob/allocate</tt> method. The value MUST be a JSON object
+          with the following properties:
+        </t>
+        <dl>
+          <dt>maxSizeUploadPut</dt>
+          <dd>
+            <t><tt>UnsignedInt</tt></t>
+            <t>
+              The maximum blob size, in octets, that the server will accept
+              for a single upload via the PUT mechanism defined in this
+              extension. Servers SHOULD support at least 250,000,000 octets
+              (250 MB).
+            </t>
+            <t>
+              This value is independent of the core capability's
+              <tt>maxSizeUpload</tt>, which continues to apply to the
+              standard POST upload mechanism defined in
+              <xref target="RFC8620"/>. A server MAY advertise a larger
+              value for <tt>maxSizeUploadPut</tt> than for
+              <tt>maxSizeUpload</tt>.
+            </t>
+          </dd>
+
+          <dt>maxPendingAllocations</dt>
+          <dd>
+            <t><tt>UnsignedInt</tt></t>
+            <t>
+              The maximum number of pending allocations (allocations where
+              the upload has not yet completed or expired) the server will
+              allow for this account. Servers SHOULD support at least 4
+              pending allocations.
+            </t>
+          </dd>
+        </dl>
+        <t>
+          These limits are defined at the account level, following the
+          pattern established by <xref target="RFC9404"/> for extension
+          methods. This allows servers to vary limits per account if needed
+          (e.g. based on subscription tier), though many deployments will
+          use uniform values.
+        </t>
+        <t>
+          If a client calls <tt>Blob/allocate</tt> for an account that does
+          not include this capability in its <tt>accountCapabilities</tt>,
+          the server MUST return an <tt>accountNotSupportedByMethod</tt>
+          error (<xref target="RFC8620"/> Section 3.6.2).
+        </t>
+      </section>
+    </section>
+
+    <section anchor="blob-allocate">
+      <name>The Blob/allocate Method</name>
+      <t>
+        The <tt>Blob/allocate</tt> method reserves a blob identifier
+        (<tt>id</tt>) and returns a pre-authorized URL to which the client
+        may upload binary data.
+      </t>
+      <t>
+        <tt>Blob/allocate</tt> is not a <tt>/set</tt> method as defined in
+        <xref target="RFC8620"/> Section 5.3. It borrows the
+        <tt>create</tt>/<tt>created</tt>/<tt>notCreated</tt> pattern for
+        consistency with <tt>Blob/upload</tt> as defined in
+        <xref target="RFC9404"/>, which establishes precedent for this
+        partial adoption. Like <tt>Blob/upload</tt> in <xref target="RFC9404"/>,
+        <tt>Blob/allocate</tt> omits <tt>oldState</tt> and
+        <tt>newState</tt> because blobs do not have state. It also
+        does not support <tt>ifInState</tt>, <tt>update</tt>, or
+        <tt>destroy</tt>.
+      </t>
+      <t>
+        <strong>Divergence from Blob/upload</strong>:
+        <xref target="RFC9404"/> Section 3.1 requires that servers MUST add
+        entries to the Response object's <tt>createdIds</tt> map for each
+        successful <tt>Blob/upload</tt>, enabling back-references in
+        subsequent method calls. <tt>Blob/allocate</tt> does not do this
+        because the blob does not yet exist at response time—the binary data
+        has not been uploaded. See the following note for details.
+      </t>
+      <t>
+        <strong>Note on pending blob identifiers</strong>: Unlike other
+        JMAP methods that create blobs, the <tt>id</tt> returned by
+        <tt>Blob/allocate</tt> does not yet represent any binary data. It is in a "pending" state (see
+        <xref target="allocation-expiry"/>) until the client completes the
+        corresponding upload. A pending allocation is not a "record" in
+        JMAP terminology (<xref target="RFC8620"/> Section 1.6.3)—it is a
+        transient reservation that becomes a blob only after successful
+        upload. Accordingly, servers MUST NOT include creation ids from
+        <tt>Blob/allocate</tt> in the Response object's <tt>createdIds</tt>
+        map (<xref target="RFC8620"/> Section 3.4), and clients MUST NOT
+        use them as back-references (<tt>#</tt> references,
+        <xref target="RFC8620"/> Section 3.7) in subsequent method calls
+        within the same Request, since the blob does not yet exist at
+        response time.
+      </t>
+
+      <section anchor="allocate-request">
+        <name>Request</name>
+        <t>
+          A <tt>Blob/allocate</tt> method call is made through the standard
+          JMAP API endpoint (<tt>/jmap</tt>). The request object MUST
+          contain the following properties:
+        </t>
+        <dl>
+          <dt>accountId</dt>
+          <dd>
+            <t><tt>Id</tt></t>
+            <t>The id of the account to upload the blob to.</t>
+          </dd>
+        </dl>
+        <t>
+          The request object MUST contain a <tt>create</tt> property, which
+          is a <tt>String[BlobAllocateRequest]</tt> map of creation id to a
+          <tt>BlobAllocateRequest</tt> object. If the number of entries in
+          the <tt>create</tt> map, combined with existing pending
+          allocations, would exceed <tt>maxPendingAllocations</tt>, the
+          server MUST return a <tt>tooManyPending</tt> error for the excess
+          entries. A <tt>BlobAllocateRequest</tt> object has the following
+          properties:
+        </t>
+        <dl>
+          <dt>type</dt>
+          <dd>
+            <t><tt>String</tt> (REQUIRED)</t>
+            <t>
+              The media type of the blob to be uploaded. The value MUST
+              conform to the <tt>media-type</tt> grammar defined in
+              <xref target="RFC6838"/> Section 4.2, including any parameters.
+              The server is not required to verify that the type is
+              registered with IANA.
+            </t>
+          </dd>
+
+          <dt>size</dt>
+          <dd>
+            <t><tt>UnsignedInt</tt> (REQUIRED)</t>
+            <t>
+              The exact size of the blob in octets. The server MUST use this
+              value to validate against <tt>maxSizeUploadPut</tt> and the
+              account's storage quota before generating the upload URL. The
+              actual upload size MUST match this declared size exactly; see
+              <xref target="size-validation"/> for enforcement details.
+            </t>
+          </dd>
+        </dl>
+      </section>
+
+      <section anchor="allocate-response">
+        <name>Response</name>
+        <t>The response object MUST contain:</t>
+        <dl>
+          <dt>accountId</dt>
+          <dd>
+            <t><tt>Id</tt></t>
+            <t>The id of the account used for the call.</t>
+          </dd>
+
+          <dt>created</dt>
+          <dd>
+            <t><tt>String[BlobAllocated]|null</tt></t>
+            <t>
+              A map of creation id to a <tt>BlobAllocated</tt> object for
+              each successfully allocated blob, or <tt>null</tt> if none
+              were successfully allocated. A <tt>BlobAllocated</tt> object
+              has the following properties:
+            </t>
+            <dl>
+              <dt>id</dt>
+              <dd>
+                <t><tt>Id</tt></t>
+                <t>
+                  The blob identifier that will represent the binary data
+                  once uploaded. This <tt>id</tt> may be used as a
+                  <tt>blobId</tt> in other JMAP methods after the upload
+                  completes successfully.
+                </t>
+              </dd>
+
+              <dt>type</dt>
+              <dd>
+                <t><tt>String</tt></t>
+                <t>
+                  The media type as provided in the request. This value
+                  reflects the client's declared intent; no upload has
+                  occurred at this point.
+                </t>
+              </dd>
+
+              <dt>size</dt>
+              <dd>
+                <t><tt>UnsignedInt</tt></t>
+                <t>
+                  The expected size as provided in the request. This value
+                  reflects the client's declared intent; the server records
+                  the actual data size after a successful upload. See
+                  <xref target="size-validation"/> for size enforcement.
+                </t>
+              </dd>
+
+              <dt>url</dt>
+              <dd>
+                <t><tt>String</tt></t>
+                <t>
+                  A pre-authorized URL to which the client MUST PUT the
+                  binary data. The URL MUST use the <tt>https</tt> scheme
+                  (see <xref target="url-security"/>). This URL is
+                  time-limited and MUST NOT be reused after expiry. The
+                  server SHOULD set an expiry of at least 15 minutes to
+                  accommodate large uploads on slower connections (250 MB
+                  at 10 Mbps takes approximately 3.5 minutes for transfer
+                  alone, plus overhead for connection setup and retries).
+                </t>
+              </dd>
+
+              <dt>expires</dt>
+              <dd>
+                <t>
+                  <tt>UTCDate</tt> (<xref target="RFC8620"/> Section 1.4)
+                </t>
+                <t>
+                  The time at which the pre-authorized URL expires. The
+                  client MUST initiate the upload before this time.
+                  Clients SHOULD allow sufficient time for the upload to
+                  complete, accounting for blob size and network
+                  conditions.
+                </t>
+              </dd>
+            </dl>
+            <t>
+              Unlike the POST upload response defined in
+              <xref target="RFC8620"/> Section 6.1, the
+              <tt>BlobAllocated</tt> object does not include a
+              <tt>name</tt> property. The filename, if relevant, is
+              established when the blob is subsequently used (for example,
+              as an email attachment).
+            </t>
+          </dd>
+
+          <dt>notCreated</dt>
+          <dd>
+            <t><tt>String[SetError]|null</tt></t>
+            <t>
+              A map of creation id to a <tt>SetError</tt> object
+              (<xref target="RFC8620"/> Section 5.3) for each failed
+              allocation, or <tt>null</tt> if all allocations succeeded.
+              The <tt>SetError</tt> object SHOULD include a
+              <tt>description</tt> property (a human-readable
+              <tt>String</tt>) to assist with debugging.
+            </t>
+          </dd>
+        </dl>
+      </section>
+
+      <section anchor="allocate-example">
+        <name>Example</name>
+        <t>
+          The following example shows a request made at
+          <tt>2099-07-01T09:50:00Z</tt>.
+        </t>
+        <t>Request:</t>
+        <sourcecode type="json"><![CDATA[
+{
+  "using": [
+    "urn:ietf:params:jmap:core",
+    "https://jmap.rrod.net/extensions/upload-put"
+  ],
+  "methodCalls": [
+    [
+      "Blob/allocate",
+      {
+        "accountId": "u12345",
+        "create": {
+          "a0": {
+            "type": "message/rfc822",
+            "size": 15000000
+          }
+        }
+      },
+      "c0"
+    ]
+  ]
+}
+]]></sourcecode>
+        <t>Response (note the expiry is 15 minutes from the request time):</t>
+        <sourcecode type="json"><![CDATA[
+{
+  "methodResponses": [
+    [
+      "Blob/allocate",
+      {
+        "accountId": "u12345",
+        "created": {
+          "a0": {
+            "id": "G1a2b3c4d5",
+            "type": "message/rfc822",
+            "size": 15000000,
+            "url": "https://storage.example.com/u12345/G1a2b3c4?...",
+            "expires": "2099-07-01T10:05:00Z"
+          }
+        },
+        "notCreated": null
+      },
+      "c0"
+    ]
+  ]
+}
+]]></sourcecode>
+      </section>
+
+      <section anchor="allocate-errors">
+        <name>Errors</name>
+        <t>
+          In addition to the standard JMAP method-level errors
+          (<xref target="RFC8620"/> Section 3.6.2), the following
+          <tt>SetError</tt> types apply to <tt>notCreated</tt>. The types
+          <tt>tooLarge</tt>, <tt>overQuota</tt>, and
+          <tt>invalidProperties</tt> are defined in
+          <xref target="RFC8620"/> Section 5.3. The type
+          <tt>tooManyPending</tt> is defined by this extension.
+        </t>
+        <dl>
+          <dt>tooLarge</dt>
+          <dd>
+            The requested <tt>size</tt> exceeds
+            <tt>maxSizeUploadPut</tt>.
+          </dd>
+
+          <dt>overQuota</dt>
+          <dd>
+            The requested upload would cause the account to exceed its
+            storage quota.
+          </dd>
+
+          <dt>tooManyPending</dt>
+          <dd>
+            The account already has the maximum number of pending
+            allocations, as advertised in <tt>maxPendingAllocations</tt>.
+            The client SHOULD wait for existing uploads to complete or
+            expire before retrying. This error type is defined by this
+            extension. Should this extension be standardized, an IANA
+            registration would be requested following the template in
+            <xref target="RFC8620"/> Section 9.5.2.
+          </dd>
+
+          <dt>invalidProperties</dt>
+          <dd>
+            The <tt>type</tt> or <tt>size</tt> property is missing, the
+            <tt>type</tt> does not conform to the media type syntax defined
+            in <xref target="RFC6838"/> Section 4.2, or the <tt>size</tt>
+            is not a valid <tt>UnsignedInt</tt>. The <tt>SetError</tt>
+            object SHOULD include a <tt>properties</tt> property listing
+            the invalid properties (<xref target="RFC8620"/> Section 5.3).
+          </dd>
+        </dl>
+        <t>
+          The use of <tt>SetError</tt> types in <tt>notCreated</tt> follows
+          the precedent established by <xref target="RFC9404"/>'s
+          <tt>Blob/upload</tt> method, which similarly borrows the
+          <tt>create</tt>/<tt>created</tt>/<tt>notCreated</tt> pattern
+          outside of a standard <tt>/set</tt> method.
+        </t>
+      </section>
+    </section>
+
+    <section anchor="direct-upload">
+      <name>Direct Upload via HTTP PUT</name>
+
+      <section anchor="put-request">
+        <name>Request</name>
+        <t>
+          The client MUST make an HTTP PUT request
+          (<xref target="RFC9110"/> Section 9.3.4) to the <tt>url</tt>
+          returned in the <tt>Blob/allocate</tt> response. The request body
+          MUST be the raw binary data of the blob.
+        </t>
+        <t>
+          The client MUST set the <tt>Content-Type</tt> header to the media
+          type provided in the allocation request.
+        </t>
+        <t>
+          The client MUST set the <tt>Content-Length</tt> header to the
+          size of the blob in octets. The client MUST NOT use chunked
+          transfer encoding; servers may require a known
+          <tt>Content-Length</tt> for validation.
+        </t>
+        <t>
+          The PUT request does not require JMAP authentication. The
+          pre-authorized URL contains all necessary credentials for the
+          upload.
+        </t>
+      </section>
+
+      <section anchor="put-response">
+        <name>Response</name>
+        <t>
+          The server MUST return a 2xx status code on successful upload.
+          Clients MUST NOT rely on any response body content. A 2xx
+          response indicates the binary data has been stored. References
+          to the <tt>id</tt> in JMAP methods will be treated as if the
+          blob does not exist until the server has finished processing
+          the upload. Processing typically completes within a few seconds.
+        </t>
+        <t>
+          Clients that require confirmation before proceeding may call
+          <tt>Blob/get</tt> (<xref target="RFC9404"/>) to verify the
+          blob exists. Alternatively, clients may reference the blob
+          immediately and retry if the server indicates the blob does
+          not exist.
+        </t>
+        <t>
+          Any non-2xx response indicates a failed upload.
+        </t>
+        <t>
+          For errors, the server MUST return an appropriate HTTP status
+          code per <xref target="RFC9110"/>. Common error responses include:
+        </t>
+        <dl>
+          <dt>400 Bad Request</dt>
+          <dd>
+            The request body is malformed, the <tt>Content-Type</tt>
+            header does not match the allocation, or the uploaded data
+            size does not match the size declared during allocation.
+          </dd>
+
+          <dt>403 Forbidden</dt>
+          <dd>
+            The pre-authorized URL has expired or is invalid.
+          </dd>
+
+          <dt>413 Content Too Large</dt>
+          <dd>
+            The uploaded data exceeds <tt>maxSizeUploadPut</tt>.
+          </dd>
+        </dl>
+        <t>
+          This list is illustrative; servers MAY return other standard HTTP
+          status codes as appropriate to the error condition.
+        </t>
+        <t>
+          Clients MUST determine the error condition from the HTTP status
+          code. Because the pre-authorized URL may be served by a different
+          endpoint than the JMAP API, the format of error response bodies is
+          implementation-dependent and MUST NOT be relied upon. (This
+          contrasts with the JMAP API endpoint, where
+          <xref target="RFC8620"/> Section 6.1 recommends
+          <xref target="RFC7807"/> problem details for HTTP errors.)
+        </t>
+        <t>
+          As noted in <xref target="blob-allocate"/>, an <tt>id</tt> from
+          an allocation that has not yet been uploaded MUST NOT be referenced
+          in JMAP method calls. If a client references such an <tt>id</tt>,
+          the server MUST treat it as if the blob does not exist.
+        </t>
+      </section>
+
+      <section anchor="retry-behavior">
+        <name>Retry Behavior</name>
+        <t>
+          If the client does not receive a response to a PUT request, the
+          upload may or may not have completed. The client MAY retry the
+          PUT if the URL has not expired. Alternatively, the client MAY
+          call <tt>Blob/allocate</tt> again to obtain a fresh URL, or
+          attempt to use the <tt>id</tt> in a subsequent method call
+          to determine whether the upload succeeded. Clients SHOULD prefer
+          checking the original <tt>id</tt> before re-allocating, as
+          new allocations reserve quota until expiry, and repeated uploads
+          may consume additional storage quota.
+        </t>
+        <t>
+          If the client has already received a 2xx response for this URL,
+          the client SHOULD NOT issue another PUT request to the same URL.
+          Server behavior for duplicate uploads after successful completion
+          is implementation-defined and may vary.
+        </t>
+      </section>
+
+      <section anchor="allocation-expiry">
+        <name>Allocation Expiry</name>
+        <t>
+          If the pre-authorized URL expires without a successful upload, the
+          allocation is void. The server MUST invalidate the <tt>id</tt>
+          and clean up any associated resources. A client MUST NOT use an
+          <tt>id</tt> from an expired allocation; the server MUST
+          treat any such reference as if the blob does not exist.
+        </t>
+        <t>
+          An <tt>id</tt> returned by <tt>Blob/allocate</tt> is in a
+          "pending" state until the corresponding upload completes
+          successfully. Pending blobs are not part of the account's blob
+          store and MUST NOT be discoverable through other JMAP methods
+          (e.g. <tt>Blob/get</tt> or <tt>Blob/lookup</tt> as defined in
+          <xref target="RFC9404"/>).
+        </t>
+      </section>
+
+      <section anchor="cancellation">
+        <name>Cancellation and Listing</name>
+        <t>
+          This extension does not define mechanisms for explicitly cancelling
+          an allocation or listing pending allocations. Clients are expected
+          to track their own pending allocations locally. If a client loses
+          this state (e.g. due to a crash), it may attempt to use an
+          <tt>id</tt> from a previous session; if the upload completed,
+          the blob will exist, otherwise the reference will fail and the
+          client can re-allocate.
+        </t>
+        <t>
+          Unused allocations simply expire after the time indicated in the
+          <tt>expires</tt> property. Servers SHOULD balance expiry periods to
+          allow sufficient time for large uploads (at least 15 minutes, per
+          <xref target="allocate-response"/>) while minimizing the duration
+          of quota reservations held by unused allocations. Servers MAY
+          release quota reservations before expiry at their discretion.
+        </t>
+      </section>
+    </section>
+
+    <section anchor="interaction-with-rfc8620">
+      <name>Interaction with RFC 8620</name>
+
+      <section anchor="post-upload">
+        <name>POST Upload</name>
+        <t>
+          The standard POST upload mechanism defined in
+          <xref target="RFC8620"/> Section 6.1 continues to operate
+          unchanged. The core capability's <tt>maxSizeUpload</tt> applies to
+          POST uploads.
+        </t>
+        <t>
+          Servers supporting this extension SHOULD set the core
+          <tt>maxSizeUpload</tt> to the actual limit of the POST upload
+          path, and advertise the higher limit via
+          <tt>maxSizeUploadPut</tt> in this extension's capability.
+        </t>
+      </section>
+
+      <section anchor="blob-references">
+        <name>Blob References</name>
+        <t>
+          Blobs uploaded via the PUT mechanism are indistinguishable from
+          blobs uploaded via POST. They share the same <tt>blobId</tt>
+          namespace and are subject to the same lifecycle rules defined in
+          <xref target="RFC8620"/> Section 6.
+        </t>
+      </section>
+
+      <section anchor="quota">
+        <name>Quota</name>
+        <t>
+          Uploads via the PUT mechanism are subject to the same account
+          quota rules as POST uploads. The quota rules defined in
+          <xref target="RFC8620"/> Section 6 apply equally to blobs created
+          via either mechanism.
+        </t>
+        <t>
+          Servers SHOULD reserve the declared <tt>size</tt> against the
+          account's storage quota for the duration of the allocation. This
+          reservation is best-effort: if other concurrent operations consume
+          the remaining quota before the upload completes, the upload MAY
+          still fail with an <tt>overQuota</tt>-equivalent HTTP error (e.g.
+          <tt>507 Insufficient Storage</tt> or <tt>413 Content Too Large</tt>).
+          Servers are not required to implement strict quota locking.
+        </t>
+      </section>
+    </section>
+
+    <section anchor="security-considerations">
+      <name>Security Considerations</name>
+
+      <section anchor="url-security">
+        <name>Pre-authorized URL Security</name>
+        <t>
+          The URL returned by <tt>Blob/allocate</tt> grants upload access
+          without further authentication. Servers MUST ensure these URLs
+          are:
+        </t>
+        <ul>
+          <li>Time-limited, with a reasonable expiry period.</li>
+          <li>Scoped to the specific blob and account.</li>
+          <li>Generated with sufficient entropy to prevent guessing.</li>
+          <li>
+            Usable only for upload (HTTP PUT). The URL MUST NOT grant any
+            other access to the uploaded data; clients retrieve blobs via
+            the standard JMAP download mechanism (<xref target="RFC8620"/>
+            Section 6.2).
+          </li>
+          <li>
+            Served over TLS. The pre-authorized URL MUST use the
+            <tt>https</tt> scheme, consistent with
+            <xref target="RFC8620"/> Section 8.1.
+          </li>
+        </ul>
+        <t>
+          Pre-authorized URLs contain embedded credentials and are
+          time-limited by design. Clients SHOULD avoid persisting these URLs
+          beyond the immediate upload operation and SHOULD NOT include them
+          in client-side logs or error reports.
+        </t>
+      </section>
+
+      <section anchor="size-validation">
+        <name>Size Validation</name>
+        <t>
+          Servers MUST validate the actual size of uploaded data against
+          <tt>maxSizeUploadPut</tt>, regardless of any size declared by the
+          client in the allocation request. The <tt>size</tt> parameter
+          enables pre-validation but MUST NOT be trusted without
+          verification. Servers MUST compare the actual upload size against
+          the declared size.
+        </t>
+        <t>
+          The server MUST reject the upload if the actual size differs
+          from the declared <tt>size</tt>. This prevents clients from
+          reserving quota for a small blob and then uploading a much
+          larger one.
+        </t>
+        <t>
+          Servers SHOULD reject uploads with mismatched
+          <tt>Content-Length</tt> headers as early as possible. Regardless
+          of how size validation is performed internally, the server
+          MUST ensure the actual uploaded size matches the declared
+          <tt>size</tt> and reject the upload if they differ.
+        </t>
+        <t>
+          Servers MUST reject uploads that exceed <tt>maxSizeUploadPut</tt>
+          with a <tt>413 Content Too Large</tt> response, regardless of the
+          declared size.
+        </t>
+      </section>
+
+      <section anchor="content-type-validation">
+        <name>Content-Type Validation</name>
+        <t>
+          Servers MUST validate that the <tt>Content-Type</tt> HTTP header
+          on the PUT request matches the <tt>type</tt> declared during
+          allocation (<xref target="put-request"/>). Clients MUST send the
+          identical <tt>Content-Type</tt> value in the PUT request, matching
+          the <tt>type</tt> value returned in the allocation response.
+          Servers MAY reject requests where the <tt>Content-Type</tt> differs
+          in any way, including case. Clients SHOULD use lowercase for type,
+          subtype, and parameter names to follow convention.
+        </t>
+        <t>
+          Servers MUST reject uploads where the <tt>Content-Type</tt>
+          header does not match the declared type.
+        </t>
+        <t>
+          Servers MUST NOT trust that the uploaded data conforms to the
+          declared media type. The <tt>type</tt> parameter describes the
+          intended media type but the server MUST NOT assume the data is
+          well-formed. Content validation, sanitization, and malware
+          scanning are out of scope for this specification.
+        </t>
+      </section>
+
+      <section anchor="allocation-abuse">
+        <name>Allocation Abuse</name>
+        <t>
+          An attacker with valid credentials could abuse the
+          <tt>Blob/allocate</tt> mechanism in several ways:
+        </t>
+        <ul>
+          <li>
+            <strong>Quota exhaustion via reservation</strong>: Repeatedly
+            calling <tt>Blob/allocate</tt> with large <tt>size</tt> values
+            to reserve quota without uploading, effectively denying storage
+            to the account. The <tt>maxPendingAllocations</tt> limit and
+            allocation expiry mitigate this.
+          </li>
+          <li>
+            <strong>Allocation flooding</strong>: Rapidly calling
+            <tt>Blob/allocate</tt> to exhaust <tt>maxPendingAllocations</tt>,
+            preventing legitimate uploads until allocations expire.
+          </li>
+        </ul>
+      </section>
+
+      <section anchor="cors">
+        <name>Cross-Origin Requests (CORS)</name>
+        <t>
+          The pre-authorized URL MAY have a different origin than the
+          JMAP API endpoint (e.g., a cloud storage service). To support
+          browser-based clients, the upload endpoint MUST respond to
+          CORS preflight requests and allow PUT requests with
+          <tt>Content-Type</tt> and <tt>Content-Length</tt> headers.
+          Specific CORS configuration (allowed origins, credentials policy,
+          preflight cache duration) is deployment-specific and outside the
+          scope of this specification.
+        </t>
+      </section>
+
+      <section anchor="integrity-verification">
+        <name>Integrity Verification</name>
+        <t>
+          Content integrity verification is outside the scope of this
+          specification. This does not preclude use of the
+          <tt>Content-MD5</tt> HTTP header where supported, or verification
+          via <tt>Blob/get</tt> with digest algorithms as defined in
+          <xref target="RFC9404"/> after the upload completes.
+        </t>
+      </section>
+    </section>
+
+    <section anchor="iana-considerations">
+      <name>IANA Considerations</name>
+      <t>
+        This document has no IANA actions. The capability identifier is a
+        URL under a domain owned by the extension author, as permitted by
+        <xref target="RFC8620"/> Section 1.8 for vendor extensions.
+      </t>
+      <t>
+        Should this extension be adopted as an IETF specification, the
+        following registrations would be requested:
+      </t>
+      <ul>
+        <li>
+          A capability registration in the JMAP Capabilities registry
+          (<xref target="RFC8620"/> Section 9.4), with the identifier
+          changing from the vendor URL to a URN such as
+          <tt>urn:ietf:params:jmap:directupload</tt>.
+        </li>
+        <li>
+          Registration of the <tt>tooManyPending</tt> error type in the
+          JMAP Error Codes registry (<xref target="RFC8620"/> Section 9.5).
+        </li>
+      </ul>
+      <t>
+        The registration template for <tt>tooManyPending</tt> would be:
+      </t>
+      <dl>
+        <dt>Error code name</dt>
+        <dd>tooManyPending</dd>
+
+        <dt>Intended use</dt>
+        <dd>common</dd>
+
+        <dt>Change controller</dt>
+        <dd>IETF</dd>
+
+        <dt>Reference</dt>
+        <dd>[this document], <xref target="allocate-errors"/></dd>
+
+        <dt>Description</dt>
+        <dd>
+          The account already has the maximum number of pending
+          allocations. The client SHOULD wait for existing uploads
+          to complete or expire before retrying.
+        </dd>
+      </dl>
+    </section>
+
+  </middle>
+
+  <back>
+    <references>
+      <name>References</name>
+
+      <references>
+        <name>Normative References</name>
+
+        <xi:include href="https://bib.ietf.org/public/rfc/bibxml/reference.RFC.2119.xml"/>
+        <xi:include href="https://bib.ietf.org/public/rfc/bibxml/reference.RFC.3986.xml"/>
+        <xi:include href="https://bib.ietf.org/public/rfc/bibxml/reference.RFC.6838.xml"/>
+        <xi:include href="https://bib.ietf.org/public/rfc/bibxml/reference.RFC.8174.xml"/>
+        <xi:include href="https://bib.ietf.org/public/rfc/bibxml/reference.RFC.8620.xml"/>
+        <xi:include href="https://bib.ietf.org/public/rfc/bibxml/reference.RFC.9110.xml"/>
+        <xi:include href="https://bib.ietf.org/public/rfc/bibxml/reference.RFC.9404.xml"/>
+      </references>
+
+      <references>
+        <name>Informative References</name>
+
+        <xi:include href="https://bib.ietf.org/public/rfc/bibxml/reference.RFC.7807.xml"/>
+      </references>
+    </references>
+
+    <section anchor="acknowledgements" numbered="false">
+      <name>Acknowledgements</name>
+      <t>
+        The author would like to thank the JMAP working group for their
+        foundational work on <xref target="RFC8620"/> and
+        <xref target="RFC9404"/>, which this extension builds upon.
+      </t>
+    </section>
+  </back>
+
+</rfc>
