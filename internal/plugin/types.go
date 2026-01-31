@@ -14,6 +14,7 @@ type PluginRecord struct {
 	PluginID         string                    `dynamodbav:"pluginId"`
 	Capabilities     map[string]map[string]any `dynamodbav:"capabilities"`
 	Methods          map[string]MethodTarget   `dynamodbav:"methods"`
+	Events           map[string]EventTarget    `dynamodbav:"events,omitempty"`
 	ClientPrincipals []string                  `dynamodbav:"clientPrincipals,omitempty"`
 	RegisteredAt     string                    `dynamodbav:"registeredAt"`
 	Version          string                    `dynamodbav:"version"`
@@ -23,4 +24,10 @@ type PluginRecord struct {
 type MethodTarget struct {
 	InvocationType string `dynamodbav:"invocationType"`
 	InvokeTarget   string `dynamodbav:"invokeTarget"`
+}
+
+// EventTarget defines where to deliver a system event (internal only)
+type EventTarget struct {
+	TargetType string `dynamodbav:"targetType"` // "sqs"
+	TargetArn  string `dynamodbav:"targetArn"`  // SQS queue ARN
 }

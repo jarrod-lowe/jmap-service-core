@@ -135,3 +135,30 @@ func (r *Registry) IsAllowedPrincipal(callerARN string) bool {
 func (r *Registry) AddMethod(method string, target MethodTarget) {
 	r.methodMap[method] = target
 }
+
+// AggregatedEventTarget represents a plugin's subscription to an event
+type AggregatedEventTarget struct {
+	PluginID   string
+	TargetType string
+	TargetArn  string
+}
+
+// GetEventTargets returns all plugin targets subscribed to an event type
+func (r *Registry) GetEventTargets(eventType string) []AggregatedEventTarget {
+	var targets []AggregatedEventTarget
+
+	for _, plugin := range r.plugins {
+		if plugin.Events == nil {
+			continue
+		}
+		if target, ok := plugin.Events[eventType]; ok {
+			targets = append(targets, AggregatedEventTarget{
+				PluginID:   plugin.PluginID,
+				TargetType: target.TargetType,
+				TargetArn:  target.TargetArn,
+			})
+		}
+	}
+
+	return targets
+}

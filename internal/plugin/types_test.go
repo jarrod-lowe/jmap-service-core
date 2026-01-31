@@ -225,3 +225,88 @@ func TestPluginInvocationResponse_ErrorResponse(t *testing.T) {
 		t.Errorf("expected error type='invalidArguments', got '%v'", resp.MethodResponse.Args["type"])
 	}
 }
+
+func TestPluginRecord_DynamoDBUnmarshal_WithEvents(t *testing.T) {
+	// Simulate DynamoDB item with events field
+	item := map[string]any{
+		"pk":       "PLUGIN#",
+		"sk":       "PLUGIN#mail-core",
+		"pluginId": "mail-core",
+		"capabilities": map[string]any{
+			"urn:ietf:params:jmap:mail": map[string]any{
+				"maxMailboxDepth": 10,
+			},
+		},
+		"methods": map[string]any{
+			"Email/get": map[string]any{
+				"invocationType": "lambda-invoke",
+				"invokeTarget":   "arn:aws:lambda:ap-southeast-2:123:function:test",
+			},
+		},
+		"events": map[string]any{
+			"account.created": map[string]any{
+				"targetType": "sqs",
+				"targetArn":  "arn:aws:sqs:ap-southeast-2:123456789012:jmap-service-email-events",
+			},
+		},
+		"registeredAt": "2025-01-17T10:00:00Z",
+		"version":      "1.0.0",
+	}
+
+	av, err := attributevalue.MarshalMap(item)
+	if err != nil {
+		t.Fatalf("failed to marshal test data: %v", err)
+	}
+
+	var record PluginRecord
+	err = attributevalue.UnmarshalMap(av, &record)
+	if err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	// Verify events were unmarshaled
+	if record.Events == nil {
+		t.Fatal("expected Events to be populated")
+	}
+
+	eventTarget, ok := record.Events["account.created"]
+	if !ok {
+		t.Fatal("expected 'account.created' event to be present")
+	}
+
+	if eventTarget.TargetType != "sqs" {
+		t.Errorf("expected TargetType='sqs', got '%s'", eventTarget.TargetType)
+	}
+
+	if eventTarget.TargetArn != "arn:aws:sqs:ap-southeast-2:123456789012:jmap-service-email-events" {
+		t.Errorf("expected correct TargetArn, got '%s'", eventTarget.TargetArn)
+	}
+}
+
+func TestEventTarget_DynamoDBRoundTrip(t *testing.T) {
+	original := EventTarget{
+		TargetType: "sqs",
+		TargetArn:  "arn:aws:sqs:ap-southeast-2:123456789012:jmap-service-email-events",
+	}
+
+	av, err := attributevalue.MarshalMap(original)
+	if err != nil {
+		t.Fatalf("failed to marshal: %v", err)
+	}
+
+	var restored EventTarget
+	err = attributevalue.UnmarshalMap(av, &restored)
+	if err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	if restored.TargetType != original.TargetType {
+		t.Errorf("TargetType mismatch: expected '%s', got '%s'",
+			original.TargetType, restored.TargetType)
+	}
+
+	if restored.TargetArn != original.TargetArn {
+		t.Errorf("TargetArn mismatch: expected '%s', got '%s'",
+			original.TargetArn, restored.TargetArn)
+	}
+}

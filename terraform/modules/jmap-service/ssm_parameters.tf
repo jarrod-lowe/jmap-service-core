@@ -67,3 +67,16 @@ resource "aws_ssm_parameter" "dynamodb_table_arn" {
     Service     = "jmap-service"
   }
 }
+
+resource "aws_ssm_parameter" "account_init_role_arn" {
+  name        = "/${local.resource_prefix}/${var.environment}/account-init-role-arn"
+  type        = "String"
+  value       = aws_iam_role.account_init_execution.arn
+  description = "IAM role ARN used by account-init Lambda for SQS queue policies"
+
+  tags = {
+    Name        = "${local.resource_prefix}-account-init-role-arn-${var.environment}"
+    Environment = var.environment
+    Service     = "jmap-service"
+  }
+}

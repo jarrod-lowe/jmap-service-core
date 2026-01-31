@@ -394,3 +394,129 @@ func TestRegistry_IsAllowedPrincipal_PluginWithNoPrincipals(t *testing.T) {
 		t.Error("expected registry with no principals to deny all")
 	}
 }
+
+// createTestPluginItemWithEvents creates a plugin record with events
+func createTestPluginItemWithEvents(pluginID string, events map[string]EventTarget) map[string]types.AttributeValue {
+	record := PluginRecord{
+		PK:           PluginPrefix,
+		SK:           PluginPrefix + pluginID,
+		PluginID:     pluginID,
+		Capabilities: map[string]map[string]any{},
+		Methods:      map[string]MethodTarget{},
+		Events:       events,
+		RegisteredAt: "2025-01-17T10:00:00Z",
+		Version:      "1.0.0",
+	}
+	item, _ := attributevalue.MarshalMap(record)
+	return item
+}
+
+func TestRegistry_GetEventTargets_ReturnsTargetsForEventType(t *testing.T) {
+	mock := &mockQuerier{
+		items: []map[string]types.AttributeValue{
+			createTestPluginItemWithEvents("mail-core", map[string]EventTarget{
+				"account.created": {
+					TargetType: "sqs",
+					TargetArn:  "arn:aws:sqs:ap-southeast-2:123456789012:jmap-service-email-events",
+				},
+			}),
+		},
+	}
+
+	registry := NewRegistry()
+	_ = registry.LoadFromDynamoDB(context.Background(), mock)
+
+	targets := registry.GetEventTargets("account.created")
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target, got %d", len(targets))
+	}
+
+	if targets[0].PluginID != "mail-core" {
+		t.Errorf("expected PluginID='mail-core', got '%s'", targets[0].PluginID)
+	}
+
+	if targets[0].TargetType != "sqs" {
+		t.Errorf("expected TargetType='sqs', got '%s'", targets[0].TargetType)
+	}
+
+	if targets[0].TargetArn != "arn:aws:sqs:ap-southeast-2:123456789012:jmap-service-email-events" {
+		t.Errorf("expected correct TargetArn, got '%s'", targets[0].TargetArn)
+	}
+}
+
+func TestRegistry_GetEventTargets_ReturnsEmptyForUnknownEvent(t *testing.T) {
+	mock := &mockQuerier{
+		items: []map[string]types.AttributeValue{
+			createTestPluginItemWithEvents("mail-core", map[string]EventTarget{
+				"account.created": {
+					TargetType: "sqs",
+					TargetArn:  "arn:aws:sqs:ap-southeast-2:123456789012:jmap-service-email-events",
+				},
+			}),
+		},
+	}
+
+	registry := NewRegistry()
+	_ = registry.LoadFromDynamoDB(context.Background(), mock)
+
+	targets := registry.GetEventTargets("unknown.event")
+	if len(targets) != 0 {
+		t.Errorf("expected 0 targets for unknown event, got %d", len(targets))
+	}
+}
+
+func TestRegistry_GetEventTargets_AggregatesFromMultiplePlugins(t *testing.T) {
+	mock := &mockQuerier{
+		items: []map[string]types.AttributeValue{
+			createTestPluginItemWithEvents("mail-core", map[string]EventTarget{
+				"account.created": {
+					TargetType: "sqs",
+					TargetArn:  "arn:aws:sqs:ap-southeast-2:123456789012:jmap-service-email-events",
+				},
+			}),
+			createTestPluginItemWithEvents("contacts-plugin", map[string]EventTarget{
+				"account.created": {
+					TargetType: "sqs",
+					TargetArn:  "arn:aws:sqs:ap-southeast-2:123456789012:jmap-service-contacts-events",
+				},
+			}),
+		},
+	}
+
+	registry := NewRegistry()
+	_ = registry.LoadFromDynamoDB(context.Background(), mock)
+
+	targets := registry.GetEventTargets("account.created")
+	if len(targets) != 2 {
+		t.Fatalf("expected 2 targets, got %d", len(targets))
+	}
+
+	// Verify both plugins are represented
+	pluginIDs := make(map[string]bool)
+	for _, target := range targets {
+		pluginIDs[target.PluginID] = true
+	}
+
+	if !pluginIDs["mail-core"] {
+		t.Error("expected mail-core plugin in targets")
+	}
+	if !pluginIDs["contacts-plugin"] {
+		t.Error("expected contacts-plugin in targets")
+	}
+}
+
+func TestRegistry_GetEventTargets_PluginWithNoEvents(t *testing.T) {
+	mock := &mockQuerier{
+		items: []map[string]types.AttributeValue{
+			createTestPluginItem("no-events", map[string]map[string]any{}, map[string]MethodTarget{}),
+		},
+	}
+
+	registry := NewRegistry()
+	_ = registry.LoadFromDynamoDB(context.Background(), mock)
+
+	targets := registry.GetEventTargets("account.created")
+	if len(targets) != 0 {
+		t.Errorf("expected 0 targets for plugin with no events, got %d", len(targets))
+	}
+}

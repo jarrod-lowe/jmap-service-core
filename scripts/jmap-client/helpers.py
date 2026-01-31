@@ -6,6 +6,17 @@ from datetime import datetime, timezone
 import requests
 
 
+# Expected special mailboxes created by jmap-service-email on account init
+EXPECTED_SPECIAL_MAILBOXES = {
+    "inbox": {"name": "Inbox", "sortOrder": 0},
+    "drafts": {"name": "Drafts", "sortOrder": 1},
+    "sent": {"name": "Sent", "sortOrder": 2},
+    "trash": {"name": "Trash", "sortOrder": 3},
+    "junk": {"name": "Junk", "sortOrder": 4},
+    "archive": {"name": "Archive", "sortOrder": 5},
+}
+
+
 def make_jmap_request(api_url: str, token: str, method_calls: list) -> dict:
     """Make a raw JMAP API request."""
     request_body = {
@@ -544,6 +555,55 @@ def destroy_mailbox(
 
     response_name, response_data, _ = method_responses[0]
     return {"methodName": response_name, **response_data}
+
+
+def get_all_mailboxes(api_url: str, token: str, account_id: str) -> list[dict]:
+    """Get all mailboxes for an account via Mailbox/get."""
+    mailbox_get_call = [
+        "Mailbox/get",
+        {
+            "accountId": account_id,
+            "ids": None,  # null = fetch all
+        },
+        "getAllMailboxes",
+    ]
+    response = make_jmap_request(api_url, token, [mailbox_get_call])
+    if "methodResponses" not in response:
+        return []
+    resp_name, resp_data, _ = response["methodResponses"][0]
+    if resp_name != "Mailbox/get":
+        return []
+    return resp_data.get("list", [])
+
+
+def verify_special_mailboxes(mailboxes: list[dict]) -> bool:
+    """Verify all 6 special mailboxes exist with correct roles. Raises AssertionError on failure."""
+    by_role = {m.get("role"): m for m in mailboxes if m.get("role")}
+
+    for role, expected in EXPECTED_SPECIAL_MAILBOXES.items():
+        assert role in by_role, f"Missing mailbox with role: {role}"
+        mailbox = by_role[role]
+        assert mailbox["name"] == expected["name"], f"Wrong name for {role}: {mailbox['name']}"
+        assert mailbox["sortOrder"] == expected["sortOrder"], f"Wrong sortOrder for {role}: {mailbox['sortOrder']}"
+
+    return True
+
+
+def destroy_all_mailboxes(api_url: str, token: str, account_id: str, mailbox_ids: list[str]) -> None:
+    """Destroy all mailboxes, removing any emails in them."""
+    if not mailbox_ids:
+        return
+
+    mailbox_set_call = [
+        "Mailbox/set",
+        {
+            "accountId": account_id,
+            "destroy": mailbox_ids,
+            "onDestroyRemoveEmails": True,
+        },
+        "destroyAllMailboxes",
+    ]
+    make_jmap_request(api_url, token, [mailbox_set_call])
 
 
 def destroy_emails_and_verify_cleanup(

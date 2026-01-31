@@ -225,7 +225,40 @@ def test_account(jmap_host, cognito_user_pool_id, cognito_client_id,
         assert accounts, "No accounts in session response"
         account_id = list(accounts.keys())[0]
 
+        # Get api_url for mailbox operations
+        api_url = session_data.get("apiUrl")
+
+        # Wait for special mailboxes to be created (async via SQS)
+        from helpers import get_all_mailboxes, verify_special_mailboxes
+
+        max_wait = 30
+        interval = 2
+        start = time.time()
+        mailboxes = []
+
+        while time.time() - start < max_wait:
+            mailboxes = get_all_mailboxes(api_url, token, account_id)
+            if len(mailboxes) >= 6:
+                try:
+                    verify_special_mailboxes(mailboxes)
+                    print(f"Verified {len(mailboxes)} special mailboxes")
+                    break
+                except AssertionError:
+                    pass
+            time.sleep(interval)
+        else:
+            pytest.fail(f"Special mailboxes not created within {max_wait}s. Found: {[m.get('role') for m in mailboxes]}")
+
+        # Store mailbox IDs for cleanup
+        mailbox_ids = [m["id"] for m in mailboxes]
+
         yield TestAccount(username=username, password=password, token=token, account_id=account_id)
+
+        # Cleanup mailboxes created by jmap-service-email
+        from helpers import destroy_all_mailboxes
+        if mailbox_ids:
+            destroy_all_mailboxes(api_url, token, account_id, mailbox_ids)
+            print(f"Destroyed {len(mailbox_ids)} mailboxes")
 
         # Verify cleanliness - this is a test assertion, not cleanup
         # Retry with backoff to allow async cleanup (DynamoDB Streams) to complete

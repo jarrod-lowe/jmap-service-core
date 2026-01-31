@@ -20,6 +20,7 @@ All parameters are under the path `/${resource_prefix}/${environment}/`:
 | `api-url` | Public API URL (CloudFront/custom domain) |
 | `dynamodb-table-name` | Core DynamoDB table name for plugin registration |
 | `dynamodb-table-arn` | Core DynamoDB table ARN for IAM policies |
+| `account-init-role-arn` | IAM role ARN used by the account-init Lambda (for SQS queue policies) |
 
 ### Example: Discovering Parameters in Terraform
 
@@ -69,6 +70,7 @@ Plugins register themselves by creating a DynamoDB record in the core service's 
 | `pluginId` | String | Unique identifier for the plugin |
 | `capabilities` | Map | JMAP capabilities provided by this plugin |
 | `methods` | Map | Method name to invocation target mapping |
+| `events` | Map | Event type to delivery target mapping (optional) |
 | `clientPrincipals` | List[String] | IAM role ARNs that this plugin uses to access IAM endpoints (optional) |
 | `registeredAt` | String | RFC3339 timestamp of registration |
 | `version` | String | Plugin version |
@@ -117,6 +119,15 @@ The `methods` map defines which JMAP methods this plugin handles. Keys are metho
 | ----- | ---- | ----------- |
 | `invocationType` | String | Currently only `"lambda-invoke"` is supported |
 | `invokeTarget` | String | Lambda function ARN |
+
+### Events
+
+The `events` map defines which system events this plugin wants to receive. Keys are event types (e.g., `account.created`), values define where to deliver the event:
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `targetType` | String | Currently only `"sqs"` is supported |
+| `targetArn` | String | SQS queue ARN (must match pattern `arn:aws:sqs:*:*:jmap-service-*`) |
 
 ## Plugin Invocation Contract
 
@@ -442,6 +453,134 @@ Requests from unregistered principals receive HTTP 403:
   "description": "Principal not authorized for IAM access"
 }
 ```
+
+## Event Subscriptions
+
+Plugins can subscribe to system events by registering SQS queue endpoints. The core service publishes events to all subscribed queues.
+
+### Available Event Types
+
+| Event Type | Description | Fired By |
+| ---------- | ----------- | -------- |
+| `account.created` | New account initialized | `account-init` Lambda |
+
+### Event Payload Structure
+
+All events are delivered as JSON messages with this structure:
+
+```json
+{
+  "eventType": "account.created",
+  "occurredAt": "2025-01-20T10:30:00Z",
+  "accountId": "abc123-def456-...",
+  "data": {
+    "quotaBytes": 10000000
+  }
+}
+```
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `eventType` | String | The event type identifier |
+| `occurredAt` | String | ISO 8601 timestamp when the event occurred |
+| `accountId` | String | The account ID related to this event |
+| `data` | Object | Event-specific data (optional, varies by event type) |
+
+### SQS Queue Requirements
+
+- Queue name **must** start with `jmap-service-` (e.g., `jmap-service-email-events`)
+- Plugin owns the queue and is responsible for retry policy and DLQ configuration
+- Queue policy must allow the `account-init` Lambda role to send messages
+
+### Example: Subscribing to Events
+
+**Plugin Registration with Events:**
+
+```json
+{
+  "pk": "PLUGIN#",
+  "sk": "PLUGIN#mail-core",
+  "pluginId": "mail-core",
+  "capabilities": { ... },
+  "methods": { ... },
+  "events": {
+    "account.created": {
+      "targetType": "sqs",
+      "targetArn": "arn:aws:sqs:ap-southeast-2:123456789012:jmap-service-email-account-events"
+    }
+  },
+  "registeredAt": "2025-01-17T10:00:00Z",
+  "version": "1.0.0"
+}
+```
+
+**Terraform Example:**
+
+```hcl
+# Discover account-init role ARN for queue policy
+data "aws_ssm_parameter" "account_init_role_arn" {
+  name = "${local.ssm_prefix}/account-init-role-arn"
+}
+
+# Create SQS queue for receiving events
+resource "aws_sqs_queue" "account_events" {
+  name = "jmap-service-${var.plugin_name}-account-events"
+
+  # Configure retry and DLQ as needed
+  visibility_timeout_seconds = 30
+  message_retention_seconds  = 86400
+}
+
+# Allow account-init Lambda to send messages
+resource "aws_sqs_queue_policy" "account_events" {
+  queue_url = aws_sqs_queue.account_events.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect    = "Allow"
+        Principal = { AWS = data.aws_ssm_parameter.account_init_role_arn.value }
+        Action    = "sqs:SendMessage"
+        Resource  = aws_sqs_queue.account_events.arn
+      }
+    ]
+  })
+}
+
+# Register event subscription in plugin record
+resource "aws_dynamodb_table_item" "plugin_registration" {
+  table_name = data.aws_ssm_parameter.jmap_table_name.value
+  hash_key   = "pk"
+  range_key  = "sk"
+
+  item = jsonencode({
+    pk       = { S = "PLUGIN#" }
+    sk       = { S = "PLUGIN#${var.plugin_name}" }
+    pluginId = { S = var.plugin_name }
+    capabilities = { M = { ... } }
+    methods = { M = { ... } }
+    events = {
+      M = {
+        "account.created" = {
+          M = {
+            targetType = { S = "sqs" }
+            targetArn  = { S = aws_sqs_queue.account_events.arn }
+          }
+        }
+      }
+    }
+    registeredAt = { S = timestamp() }
+    version      = { S = var.plugin_version }
+  })
+}
+```
+
+### Security Model
+
+1. **Queue naming convention**: Only queues named `jmap-service-*` can receive events
+2. **Queue policy required**: Plugins must configure queue policies to allow the `account-init` role
+3. **Plugin owns delivery**: Plugins are responsible for processing, retries, and DLQ handling
 
 ## Go Plugin Development
 

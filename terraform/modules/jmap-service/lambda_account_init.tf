@@ -52,12 +52,13 @@ resource "aws_iam_role_policy" "account_init_cloudwatch_metrics" {
   policy = data.aws_iam_policy_document.cloudwatch_metrics.json
 }
 
-# IAM policy for DynamoDB access (PutItem for account META# record)
+# IAM policy for DynamoDB access (PutItem for account META# record, Query for plugin registry)
 data "aws_iam_policy_document" "account_init_dynamodb" {
   statement {
     effect = "Allow"
     actions = [
       "dynamodb:PutItem",
+      "dynamodb:Query",
     ]
     resources = [aws_dynamodb_table.jmap_data.arn]
   }
@@ -87,6 +88,25 @@ resource "aws_iam_role_policy" "account_init_cognito" {
   name   = "${local.resource_prefix}-account-init-cognito-${var.environment}"
   role   = aws_iam_role.account_init_execution.id
   policy = data.aws_iam_policy_document.account_init_cognito.json
+}
+
+# IAM policy for SQS access (SendMessage to plugin event queues)
+data "aws_iam_policy_document" "account_init_sqs" {
+  statement {
+    effect = "Allow"
+    actions = [
+      "sqs:SendMessage",
+    ]
+    resources = [
+      "arn:aws:sqs:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:jmap-service-*"
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "account_init_sqs" {
+  name   = "${local.resource_prefix}-account-init-sqs-${var.environment}"
+  role   = aws_iam_role.account_init_execution.id
+  policy = data.aws_iam_policy_document.account_init_sqs.json
 }
 
 # =============================================================================
@@ -144,6 +164,7 @@ resource "aws_lambda_function" "account_init" {
     aws_iam_role_policy.account_init_cloudwatch_metrics,
     aws_iam_role_policy.account_init_dynamodb,
     aws_iam_role_policy.account_init_cognito,
+    aws_iam_role_policy.account_init_sqs,
     aws_cloudwatch_log_group.account_init_logs
   ]
 
