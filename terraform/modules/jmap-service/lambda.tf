@@ -95,6 +95,12 @@ resource "aws_lambda_function" "jmap_api" {
       API_DOMAIN     = var.domain_name
       DYNAMODB_TABLE = aws_dynamodb_table.jmap_data.name
 
+      # Blob/allocate configuration
+      BLOB_BUCKET                   = aws_s3_bucket.blobs.bucket
+      MAX_SIZE_UPLOAD_PUT           = tostring(var.max_size_upload_put)
+      MAX_PENDING_ALLOCATIONS       = tostring(var.max_pending_allocations)
+      ALLOCATION_URL_EXPIRY_SECONDS = tostring(var.allocation_url_expiry_seconds)
+
       # ADOT Collector Configuration
       OPENTELEMETRY_COLLECTOR_CONFIG_URI = "file:///var/task/collector.yaml"
       OPENTELEMETRY_EXTENSION_LOG_LEVEL  = "error"
@@ -121,6 +127,7 @@ resource "aws_lambda_function" "jmap_api" {
     aws_iam_role_policy.jmap_api_cloudwatch_metrics,
     aws_iam_role_policy.jmap_api_dynamodb,
     aws_iam_role_policy.jmap_api_lambda_invoke,
+    aws_iam_role_policy.jmap_api_s3_presign,
     aws_cloudwatch_log_group.jmap_api_logs
   ]
 

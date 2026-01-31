@@ -39,6 +39,26 @@ resource "aws_cognito_user_pool" "main" {
     }
   }
 
+  # Custom attribute to track account initialization
+  # Prevents redundant DynamoDB calls on every authentication
+  schema {
+    name                     = "account_initialized"
+    attribute_data_type      = "String"
+    mutable                  = true
+    required                 = false
+    developer_only_attribute = false
+
+    string_attribute_constraints {
+      min_length = 0
+      max_length = 5
+    }
+  }
+
+  # Post Authentication Lambda trigger for account initialization
+  lambda_config {
+    post_authentication = aws_lambda_function.account_init.arn
+  }
+
   tags = {
     Name        = "jmap-service-${var.environment}"
     Environment = var.environment

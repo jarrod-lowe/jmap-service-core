@@ -26,9 +26,9 @@ type BlobDeleter interface {
 	DeleteObject(ctx context.Context, bucket, key string) error
 }
 
-// BlobDBDeleter deletes blob records from DynamoDB
+// BlobDBDeleter deletes blob records from DynamoDB and restores quota
 type BlobDBDeleter interface {
-	DeleteBlobRecord(ctx context.Context, pk, sk string) error
+	DeleteBlobRecord(ctx context.Context, pk, sk string, accountID string, size int64) error
 }
 
 // Dependencies for handler (injectable for testing)
@@ -89,11 +89,13 @@ func processRecord(ctx context.Context, record events.DynamoDBEventRecord) error
 
 	accountID, _ := extractStringAttribute(newImage, "accountId")
 	blobID, _ := extractStringAttribute(newImage, "blobId")
+	size := extractNumberAttribute(newImage, "size")
 
 	logger.InfoContext(ctx, "Cleaning up deleted blob",
 		slog.String("account_id", accountID),
 		slog.String("blob_id", blobID),
 		slog.String("s3_key", s3Key),
+		slog.Int64("size", size),
 	)
 
 	// Delete S3 object
@@ -105,8 +107,8 @@ func processRecord(ctx context.Context, record events.DynamoDBEventRecord) error
 		return fmt.Errorf("failed to delete S3 object %s: %w", s3Key, err)
 	}
 
-	// Delete DynamoDB record
-	if err := deps.DBDeleter.DeleteBlobRecord(ctx, pk, sk); err != nil {
+	// Delete DynamoDB record and restore quota
+	if err := deps.DBDeleter.DeleteBlobRecord(ctx, pk, sk, accountID, size); err != nil {
 		logger.ErrorContext(ctx, "Failed to delete DynamoDB record",
 			slog.String("pk", pk),
 			slog.String("sk", sk),
@@ -137,6 +139,19 @@ func extractStringAttribute(image map[string]events.DynamoDBAttributeValue, key 
 		return "", false
 	}
 	return val, true
+}
+
+// extractNumberAttribute extracts a number value from a DynamoDB stream attribute map
+func extractNumberAttribute(image map[string]events.DynamoDBAttributeValue, key string) int64 {
+	attr, ok := image[key]
+	if !ok {
+		return 0
+	}
+	if attr.DataType() != events.DataTypeNumber {
+		return 0
+	}
+	val, _ := attr.Integer()
+	return val
 }
 
 // =============================================================================
@@ -176,13 +191,45 @@ func NewDynamoDBBlobDeleter(client *dynamodb.Client, tableName string) *DynamoDB
 	}
 }
 
-// DeleteBlobRecord deletes a blob record from DynamoDB
-func (d *DynamoDBBlobDeleter) DeleteBlobRecord(ctx context.Context, pk, sk string) error {
-	_, err := d.client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
-		TableName: aws.String(d.tableName),
-		Key: map[string]types.AttributeValue{
-			"pk": &types.AttributeValueMemberS{Value: pk},
-			"sk": &types.AttributeValueMemberS{Value: sk},
+// DeleteBlobRecord deletes a blob record from DynamoDB and restores quota to META#
+func (d *DynamoDBBlobDeleter) DeleteBlobRecord(ctx context.Context, pk, sk string, accountID string, size int64) error {
+	// If we don't have accountID or size, fall back to simple delete
+	if accountID == "" || size == 0 {
+		_, err := d.client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+			TableName: aws.String(d.tableName),
+			Key: map[string]types.AttributeValue{
+				"pk": &types.AttributeValueMemberS{Value: pk},
+				"sk": &types.AttributeValueMemberS{Value: sk},
+			},
+		})
+		return err
+	}
+
+	// Use transaction to delete blob and restore quota atomically
+	_, err := d.client.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
+		TransactItems: []types.TransactWriteItem{
+			{
+				Delete: &types.Delete{
+					TableName: aws.String(d.tableName),
+					Key: map[string]types.AttributeValue{
+						"pk": &types.AttributeValueMemberS{Value: pk},
+						"sk": &types.AttributeValueMemberS{Value: sk},
+					},
+				},
+			},
+			{
+				Update: &types.Update{
+					TableName: aws.String(d.tableName),
+					Key: map[string]types.AttributeValue{
+						"pk": &types.AttributeValueMemberS{Value: fmt.Sprintf("ACCOUNT#%s", accountID)},
+						"sk": &types.AttributeValueMemberS{Value: "META#"},
+					},
+					UpdateExpression: aws.String("ADD quotaRemaining :size"),
+					ExpressionAttributeValues: map[string]types.AttributeValue{
+						":size": &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", size)},
+					},
+				},
+			},
 		},
 	})
 	return err

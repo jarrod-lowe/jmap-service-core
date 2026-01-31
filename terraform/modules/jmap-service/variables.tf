@@ -97,3 +97,66 @@ variable "iam_client_principals" {
   type        = list(string)
   default     = []
 }
+
+# PUT Upload Extension Variables
+
+variable "allocation_url_expiry_seconds" {
+  description = "Pre-signed URL validity period for Blob/allocate"
+  type        = number
+  default     = 900 # 15 minutes
+
+  validation {
+    condition     = var.allocation_url_expiry_seconds >= 60 && var.allocation_url_expiry_seconds <= 3600
+    error_message = "Allocation URL expiry must be between 60 seconds (1 minute) and 3600 seconds (1 hour)"
+  }
+}
+
+variable "allocation_cleanup_buffer_hours" {
+  description = "Hours after URL expiry before cleanup processes pending allocation records"
+  type        = number
+  default     = 72 # 3 days
+
+  validation {
+    condition     = var.allocation_cleanup_buffer_hours >= 1 && var.allocation_cleanup_buffer_hours <= 168
+    error_message = "Allocation cleanup buffer must be between 1 and 168 hours (7 days)"
+  }
+}
+
+variable "max_size_upload_put" {
+  description = "Maximum blob size for PUT upload in bytes"
+  type        = number
+  default     = 250000000 # 250 MB
+
+  validation {
+    condition     = var.max_size_upload_put >= 1000000 && var.max_size_upload_put <= 5368709120
+    error_message = "Max PUT upload size must be between 1 MB and 5 GB"
+  }
+}
+
+variable "max_pending_allocations" {
+  description = "Maximum pending allocations per account"
+  type        = number
+  default     = 4
+
+  validation {
+    condition     = var.max_pending_allocations >= 1 && var.max_pending_allocations <= 100
+    error_message = "Max pending allocations must be between 1 and 100"
+  }
+}
+
+variable "default_quota_bytes" {
+  description = "Default storage quota for new accounts in bytes"
+  type        = number
+  default     = 1073741824 # 1 GB
+
+  validation {
+    condition     = var.default_quota_bytes >= 10485760 && var.default_quota_bytes <= 1099511627776
+    error_message = "Default quota must be between 10 MB and 1 TB"
+  }
+}
+
+variable "cors_allowed_origins" {
+  description = "Origins allowed for CORS PUT uploads"
+  type        = list(string)
+  default     = ["*"]
+}

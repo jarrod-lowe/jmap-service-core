@@ -15,6 +15,26 @@ resource "aws_dynamodb_table" "jmap_data" {
     type = "S"
   }
 
+  # GSI attributes for pending blob allocation queries
+  attribute {
+    name = "gsi1pk"
+    type = "S"
+  }
+
+  attribute {
+    name = "gsi1sk"
+    type = "S"
+  }
+
+  # GSI for querying pending blob allocations across all accounts
+  # Enables efficient cleanup of expired pending allocations
+  global_secondary_index {
+    name            = "gsi1"
+    hash_key        = "gsi1pk"
+    range_key       = "gsi1sk"
+    projection_type = "ALL"
+  }
+
   stream_enabled   = true
   stream_view_type = "NEW_AND_OLD_IMAGES"
 

@@ -6,11 +6,16 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	lambdasvc "github.com/aws/aws-sdk-go-v2/service/lambda"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/google/uuid"
+	"github.com/jarrod-lowe/jmap-service-core/internal/bloballocate"
 	"github.com/jarrod-lowe/jmap-service-core/internal/db"
 	"github.com/jarrod-lowe/jmap-service-core/internal/plugin"
 	"github.com/jarrod-lowe/jmap-service-core/internal/resultref"
@@ -50,8 +55,9 @@ type Response struct {
 
 // Dependencies for handler (injectable for testing)
 type Dependencies struct {
-	Registry *plugin.Registry
-	Invoker  plugin.Invoker
+	Registry       *plugin.Registry
+	Invoker        plugin.Invoker
+	BlobAllocator  *bloballocate.Handler
 }
 
 var deps *Dependencies
@@ -128,7 +134,7 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 	methodResponses := make([][]any, 0, len(jmapReq.MethodCalls))
 	trackedResponses := make([]resultref.MethodResponse, 0, len(jmapReq.MethodCalls))
 	for i, call := range jmapReq.MethodCalls {
-		resp := processMethodCall(ctx, accountID, call, i, request.RequestContext.RequestID, trackedResponses)
+		resp := processMethodCall(ctx, accountID, call, i, request.RequestContext.RequestID, trackedResponses, jmapReq.Using)
 		methodResponses = append(methodResponses, resp)
 		// Track response for future result references
 		trackedResponses = append(trackedResponses, toMethodResponse(resp))
@@ -191,8 +197,11 @@ func extractAccountID(request events.APIGatewayProxyRequest) (string, error) {
 	return sub, nil
 }
 
+// UploadPutCapability is the capability URN for the PUT upload extension
+const UploadPutCapability = "https://jmap.rrod.net/extensions/upload-put"
+
 // processMethodCall dispatches a method call to the appropriate plugin
-func processMethodCall(ctx context.Context, accountID string, call []any, index int, requestID string, previousResponses []resultref.MethodResponse) []any {
+func processMethodCall(ctx context.Context, accountID string, call []any, index int, requestID string, previousResponses []resultref.MethodResponse, usingCaps []string) []any {
 	// Validate call structure: [methodName, args, clientId]
 	if len(call) != 3 {
 		return []any{"error", map[string]any{
@@ -236,6 +245,11 @@ func processMethodCall(ctx context.Context, accountID string, call []any, index 
 			"type":        "serverFail",
 			"description": "Failed to resolve result references",
 		}, clientID}
+	}
+
+	// Handle built-in methods before plugin dispatch
+	if methodName == "Blob/allocate" {
+		return handleBlobAllocate(ctx, accountID, resolvedArgs, clientID, usingCaps)
 	}
 
 	// Look up method target
@@ -310,6 +324,119 @@ func toMethodResponse(resp []any) resultref.MethodResponse {
 	}
 }
 
+// handleBlobAllocate processes a Blob/allocate method call
+func handleBlobAllocate(ctx context.Context, accountID string, args map[string]any, clientID string, usingCaps []string) []any {
+	// Check if Blob/allocate is enabled
+	if deps.BlobAllocator == nil {
+		return []any{"error", map[string]any{
+			"type": "unknownMethod",
+		}, clientID}
+	}
+
+	// Check that the capability is in the using array
+	hasCapability := false
+	for _, cap := range usingCaps {
+		if cap == UploadPutCapability {
+			hasCapability = true
+			break
+		}
+	}
+	if !hasCapability {
+		return []any{"error", map[string]any{
+			"type":        "unknownMethod",
+			"description": "Blob/allocate requires the " + UploadPutCapability + " capability",
+		}, clientID}
+	}
+
+	// Validate accountId in args
+	argsAccountID, _ := args["accountId"].(string)
+	if argsAccountID != "" && argsAccountID != accountID {
+		return []any{"error", map[string]any{
+			"type":        "accountNotFound",
+			"description": "Account ID mismatch",
+		}, clientID}
+	}
+
+	// Extract the create map (per RFC 9404 pattern)
+	createMap, ok := args["create"].(map[string]any)
+	if !ok || len(createMap) == 0 {
+		return []any{"error", map[string]any{
+			"type":        "invalidArguments",
+			"description": "create map is required",
+		}, clientID}
+	}
+
+	created := make(map[string]any)
+	notCreated := make(map[string]any)
+
+	// Process each creation request
+	for creationID, reqData := range createMap {
+		reqMap, ok := reqData.(map[string]any)
+		if !ok {
+			notCreated[creationID] = map[string]any{
+				"type":        "invalidArguments",
+				"description": "invalid request format",
+			}
+			continue
+		}
+
+		contentType, _ := reqMap["type"].(string)
+		size, _ := reqMap["size"].(float64) // JSON numbers come as float64
+
+		req := bloballocate.AllocateRequest{
+			AccountID: accountID,
+			Type:      contentType,
+			Size:      int64(size),
+		}
+
+		resp, err := deps.BlobAllocator.Allocate(ctx, req)
+		if err != nil {
+			allocErr, ok := err.(*bloballocate.AllocationError)
+			if ok {
+				errInfo := map[string]any{
+					"type":        allocErr.Type,
+					"description": allocErr.Message,
+				}
+				if len(allocErr.Properties) > 0 {
+					errInfo["properties"] = allocErr.Properties
+				}
+				notCreated[creationID] = errInfo
+			} else {
+				notCreated[creationID] = map[string]any{
+					"type":        "serverFail",
+					"description": "Failed to allocate blob",
+				}
+			}
+			continue
+		}
+
+		created[creationID] = map[string]any{
+			"id":      resp.BlobID,
+			"type":    resp.Type,
+			"size":    resp.Size,
+			"url":     resp.URL,
+			"expires": resp.URLExpires.UTC().Format("2006-01-02T15:04:05Z"),
+		}
+	}
+
+	// Build response per RFC 9404 pattern
+	response := map[string]any{
+		"accountId": accountID,
+	}
+	if len(created) > 0 {
+		response["created"] = created
+	} else {
+		response["created"] = nil
+	}
+	if len(notCreated) > 0 {
+		response["notCreated"] = notCreated
+	} else {
+		response["notCreated"] = nil
+	}
+
+	return []any{"Blob/allocate", response, clientID}
+}
+
 // isIAMAuthenticatedRequest checks if the request is IAM-authenticated
 // by checking if UserArn is populated in the request context
 func isIAMAuthenticatedRequest(request events.APIGatewayProxyRequest) bool {
@@ -319,6 +446,14 @@ func isIAMAuthenticatedRequest(request events.APIGatewayProxyRequest) bool {
 // extractCallerPrincipal extracts the caller's IAM principal ARN from the request
 func extractCallerPrincipal(request events.APIGatewayProxyRequest) string {
 	return request.RequestContext.Identity.UserArn
+}
+
+// RealUUIDGenerator generates real UUIDs
+type RealUUIDGenerator struct{}
+
+// Generate generates a new UUID v4
+func (r *RealUUIDGenerator) Generate() string {
+	return uuid.New().String()
 }
 
 func main() {
@@ -368,9 +503,45 @@ func main() {
 	lambdaClient := lambdasvc.NewFromConfig(lambdaCfg)
 	invoker := plugin.NewLambdaInvoker(lambdaClient)
 
+	// Initialize Blob/allocate handler
+	var blobAllocator *bloballocate.Handler
+	blobBucket := os.Getenv("BLOB_BUCKET")
+	if blobBucket != "" {
+		// Get config from environment
+		maxSizeUploadPut, _ := strconv.ParseInt(os.Getenv("MAX_SIZE_UPLOAD_PUT"), 10, 64)
+		if maxSizeUploadPut == 0 {
+			maxSizeUploadPut = 250000000 // default 250 MB
+		}
+		maxPendingAllocs, _ := strconv.Atoi(os.Getenv("MAX_PENDING_ALLOCATIONS"))
+		if maxPendingAllocs == 0 {
+			maxPendingAllocs = 4
+		}
+		urlExpirySecs, _ := strconv.ParseInt(os.Getenv("ALLOCATION_URL_EXPIRY_SECONDS"), 10, 64)
+		if urlExpirySecs == 0 {
+			urlExpirySecs = 900 // default 15 minutes
+		}
+
+		// Initialize S3 presign client
+		s3Client := s3.NewFromConfig(lambdaCfg)
+		presignClient := s3.NewPresignClient(s3Client)
+
+		// Initialize DynamoDB client for blob allocations
+		ddbClient := dynamodb.NewFromConfig(lambdaCfg)
+
+		blobAllocator = &bloballocate.Handler{
+			Storage:          bloballocate.NewS3Storage(presignClient, blobBucket),
+			DB:               bloballocate.NewDynamoDBStore(ddbClient, tableName),
+			UUIDGen:          &RealUUIDGenerator{},
+			MaxSizeUploadPut: maxSizeUploadPut,
+			MaxPendingAllocs: maxPendingAllocs,
+			URLExpirySecs:    urlExpirySecs,
+		}
+	}
+
 	deps = &Dependencies{
-		Registry: registry,
-		Invoker:  invoker,
+		Registry:      registry,
+		Invoker:       invoker,
+		BlobAllocator: blobAllocator,
 	}
 
 	lambda.Start(otellambda.InstrumentHandler(handler, xrayconfig.WithRecommendedOptions(tp)...))

@@ -257,7 +257,7 @@ func TestProcessMethodCall_InvalidCallStructure_ReturnsError(t *testing.T) {
 
 	// Call with wrong number of elements
 	call := []any{"method", "not-an-object"}
-	result := processMethodCall(ctx, "user-123", call, 0, "req-123", nil)
+	result := processMethodCall(ctx, "user-123", call, 0, "req-123", nil, nil)
 
 	if result[0] != "error" {
 		t.Errorf("expected error response, got '%v'", result[0])
@@ -269,7 +269,7 @@ func TestProcessMethodCall_NonStringMethodName_ReturnsError(t *testing.T) {
 	ctx := context.Background()
 
 	call := []any{123, map[string]any{}, "c0"}
-	result := processMethodCall(ctx, "user-123", call, 0, "req-123", nil)
+	result := processMethodCall(ctx, "user-123", call, 0, "req-123", nil, nil)
 
 	if result[0] != "error" {
 		t.Errorf("expected error response, got '%v'", result[0])

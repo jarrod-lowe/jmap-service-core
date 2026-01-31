@@ -3,6 +3,7 @@
 # JMAP Protocol Compliance Test Wrapper
 #
 # Uses jmapc (independent Python JMAP client) to validate protocol compliance.
+# Creates ephemeral Cognito users for test isolation.
 #
 # Usage: ./jmap-client-test.sh [ENV]
 #   ENV: test or prod (default: test)
@@ -11,7 +12,6 @@
 #   - AWS CLI configured with ses-mail profile
 #   - Python 3 with venv installed
 #   - jq installed
-#   - yq installed (for YAML parsing)
 #   - Terraform applied for the target environment
 #   - Python venv created via 'make scripts/.venv'
 #
@@ -21,7 +21,6 @@ set -euo pipefail
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Configuration
@@ -29,7 +28,6 @@ ENV="${1:-test}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 TF_DIR="$PROJECT_DIR/terraform/environments/$ENV"
-TEST_USER_FILE="$PROJECT_DIR/test-user.yaml"
 VENV_DIR="$PROJECT_DIR/scripts/.venv"
 AWS_PROFILE="ses-mail"
 
@@ -51,21 +49,12 @@ check_prerequisites() {
         missing+=("jq")
     fi
 
-    if ! command -v yq &> /dev/null; then
-        missing+=("yq")
-    fi
-
     if ! command -v aws &> /dev/null; then
         missing+=("aws-cli")
     fi
 
     if [[ ${#missing[@]} -gt 0 ]]; then
         echo -e "${RED}ERROR: Missing required tools: ${missing[*]}${NC}"
-        exit 1
-    fi
-
-    if [[ ! -f "$TEST_USER_FILE" ]]; then
-        echo -e "${RED}ERROR: Test user file not found: $TEST_USER_FILE${NC}"
         exit 1
     fi
 
@@ -91,18 +80,9 @@ tf_output() {
     cd "$TF_DIR" && AWS_PROFILE="$AWS_PROFILE" terraform output -raw "$key" 2>/dev/null
 }
 
-# Load configuration from terraform and test-user.yaml
+# Load configuration from terraform outputs
 load_config() {
     echo "Loading configuration..."
-
-    # Get credentials from test-user.yaml
-    USERNAME=$(yq ".env.$ENV.username" "$TEST_USER_FILE")
-    PASSWORD=$(yq ".env.$ENV.password" "$TEST_USER_FILE")
-
-    if [[ -z "$USERNAME" || "$USERNAME" == "null" ]]; then
-        echo -e "${RED}ERROR: Username not found in $TEST_USER_FILE for env.$ENV${NC}"
-        exit 1
-    fi
 
     # Get terraform outputs
     USER_POOL_ID=$(tf_output "cognito_user_pool_id")
@@ -110,6 +90,9 @@ load_config() {
     JMAP_HOST=$(tf_output "jmap_host")
     BLOB_BUCKET=$(tf_output "blob_bucket_name")
     DYNAMODB_TABLE=$(tf_output "dynamodb_table_name")
+
+    # Email plugin table (may not exist)
+    DYNAMODB_EMAIL_TABLE="${DYNAMODB_TABLE/core/email}" || ""
 
     # Extract region from Cognito User Pool ID (format: region_xxxxxx)
     REGION=$(echo "$USER_POOL_ID" | cut -d'_' -f1)
@@ -120,37 +103,9 @@ load_config() {
     echo "  Environment: $ENV"
     echo "  Region: $REGION"
     echo "  JMAP Host: $JMAP_HOST"
-    echo "  User: $USERNAME"
-}
-
-# Authenticate and get token
-get_token() {
-    echo "Authenticating..."
-
-    local auth_result
-    auth_result=$(AWS_PROFILE="$AWS_PROFILE" aws cognito-idp admin-initiate-auth \
-        --user-pool-id "$USER_POOL_ID" \
-        --client-id "$CLIENT_ID" \
-        --auth-flow ADMIN_NO_SRP_AUTH \
-        --auth-parameters "USERNAME=$USERNAME,PASSWORD=$PASSWORD" \
-        --region "$REGION" \
-        2>&1)
-
-    if [[ $? -ne 0 ]]; then
-        echo -e "${RED}ERROR: Authentication failed${NC}"
-        echo "$auth_result"
-        exit 1
-    fi
-
-    TOKEN=$(echo "$auth_result" | jq -r '.AuthenticationResult.IdToken')
-
-    if [[ -z "$TOKEN" || "$TOKEN" == "null" ]]; then
-        echo -e "${RED}ERROR: Failed to extract token from auth result${NC}"
-        echo "$auth_result"
-        exit 1
-    fi
-
-    echo -e "${GREEN}  Authentication successful${NC}"
+    echo "  Core Table: $DYNAMODB_TABLE"
+    echo "  Email Table: $DYNAMODB_EMAIL_TABLE"
+    echo -e "${GREEN}  Using ephemeral test users${NC}"
 }
 
 # Run the Python test
@@ -161,10 +116,12 @@ run_python_test() {
 
     # Export environment variables for the Python script
     export JMAP_HOST="$JMAP_HOST"
-    export JMAP_API_TOKEN="$TOKEN"
     export BLOB_BUCKET="$BLOB_BUCKET"
     export DYNAMODB_TABLE="$DYNAMODB_TABLE"
+    export DYNAMODB_EMAIL_TABLE="$DYNAMODB_EMAIL_TABLE"
     export AWS_REGION="$REGION"
+    export COGNITO_USER_POOL_ID="$USER_POOL_ID"
+    export COGNITO_CLIENT_ID="$CLIENT_ID"
 
     # Activate venv and run pytest
     source "$VENV_DIR/bin/activate"
@@ -179,7 +136,6 @@ main() {
 
     check_prerequisites
     load_config
-    get_token
     run_python_test
 }
 

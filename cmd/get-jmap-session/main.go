@@ -184,7 +184,13 @@ func buildSession(userID string, cfg Config, registry *plugin.Registry) JMAPSess
 				capConfig = map[string]any{}
 			}
 			capabilities[cap] = capConfig
-			accountCapabilities[cap] = map[string]any{}
+			// For upload-put extension, include config in account capabilities
+			// so clients know the limits for this account
+			if cap == "https://jmap.rrod.net/extensions/upload-put" {
+				accountCapabilities[cap] = capConfig
+			} else {
+				accountCapabilities[cap] = map[string]any{}
+			}
 			primaryAccounts[cap] = userID
 		}
 	}

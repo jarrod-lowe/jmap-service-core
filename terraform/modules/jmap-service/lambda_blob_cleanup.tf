@@ -57,7 +57,9 @@ data "aws_iam_policy_document" "blob_cleanup_dynamodb" {
   statement {
     effect = "Allow"
     actions = [
-      "dynamodb:DeleteItem"
+      "dynamodb:DeleteItem",
+      "dynamodb:TransactWriteItems",
+      "dynamodb:UpdateItem"
     ]
     resources = [aws_dynamodb_table.jmap_data.arn]
   }

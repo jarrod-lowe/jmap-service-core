@@ -56,12 +56,29 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "blobs" {
   }
 }
 
-# Enable versioning for data protection
+# Suspend versioning to prevent version multiplication attacks
+# The PUT upload extension requires versioning suspended so that repeated
+# uploads to the same key don't accumulate versions
+# Note: "Suspended" is used instead of "Disabled" because S3 doesn't allow
+# transitioning from Enabled to Disabled on existing buckets
 resource "aws_s3_bucket_versioning" "blobs" {
   bucket = aws_s3_bucket.blobs.id
 
   versioning_configuration {
-    status = "Enabled"
+    status = "Suspended"
+  }
+}
+
+# CORS configuration for direct PUT uploads from browser clients
+resource "aws_s3_bucket_cors_configuration" "blobs" {
+  bucket = aws_s3_bucket.blobs.id
+
+  cors_rule {
+    allowed_headers = ["Content-Type", "Content-Length"]
+    allowed_methods = ["PUT"]
+    allowed_origins = var.cors_allowed_origins
+    expose_headers  = ["ETag"]
+    max_age_seconds = 3600
   }
 }
 
@@ -101,21 +118,4 @@ resource "aws_s3_bucket_lifecycle_configuration" "blobs" {
     }
   }
 
-  # Expire noncurrent versions after 30 days
-  rule {
-    id     = "expire-noncurrent-versions"
-    status = "Enabled"
-
-    filter {
-      prefix = ""
-    }
-
-    noncurrent_version_expiration {
-      noncurrent_days = 30
-    }
-
-    expiration {
-      expired_object_delete_marker = true
-    }
-  }
 }

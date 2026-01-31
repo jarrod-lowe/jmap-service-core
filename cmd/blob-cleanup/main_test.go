@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/aws/aws-lambda-go/events"
@@ -30,20 +31,22 @@ func (m *mockS3Deleter) DeleteObject(ctx context.Context, bucket, key string) er
 }
 
 type mockDBDeleter struct {
-	deleteFunc func(ctx context.Context, pk, sk string) error
+	deleteFunc func(ctx context.Context, pk, sk, accountID string, size int64) error
 	deleteErr  error
 	calls      []dbDeleteCall
 }
 
 type dbDeleteCall struct {
-	PK string
-	SK string
+	PK        string
+	SK        string
+	AccountID string
+	Size      int64
 }
 
-func (m *mockDBDeleter) DeleteBlobRecord(ctx context.Context, pk, sk string) error {
-	m.calls = append(m.calls, dbDeleteCall{PK: pk, SK: sk})
+func (m *mockDBDeleter) DeleteBlobRecord(ctx context.Context, pk, sk, accountID string, size int64) error {
+	m.calls = append(m.calls, dbDeleteCall{PK: pk, SK: sk, AccountID: accountID, Size: size})
 	if m.deleteFunc != nil {
-		return m.deleteFunc(ctx, pk, sk)
+		return m.deleteFunc(ctx, pk, sk, accountID, size)
 	}
 	return m.deleteErr
 }
@@ -70,6 +73,10 @@ func makeModifyRecord(oldImage, newImage map[string]events.DynamoDBAttributeValu
 	}
 }
 
+func newNumberAttr(val int64) events.DynamoDBAttributeValue {
+	return events.NewNumberAttribute(fmt.Sprintf("%d", val))
+}
+
 func blobNewImage() map[string]events.DynamoDBAttributeValue {
 	return map[string]events.DynamoDBAttributeValue{
 		"pk":        newStringAttr("ACCOUNT#user-456"),
@@ -77,6 +84,7 @@ func blobNewImage() map[string]events.DynamoDBAttributeValue {
 		"accountId": newStringAttr("user-456"),
 		"blobId":    newStringAttr("blob-123"),
 		"s3Key":     newStringAttr("user-456/blob-123"),
+		"size":      newNumberAttr(1024),
 		"deletedAt": newStringAttr("2024-06-01T00:00:00Z"),
 	}
 }
@@ -88,6 +96,7 @@ func blobOldImage() map[string]events.DynamoDBAttributeValue {
 		"accountId": newStringAttr("user-456"),
 		"blobId":    newStringAttr("blob-123"),
 		"s3Key":     newStringAttr("user-456/blob-123"),
+		"size":      newNumberAttr(1024),
 	}
 }
 
@@ -319,6 +328,7 @@ func TestCleanup_MultipleRecords_AllProcessed(t *testing.T) {
 		"accountId": newStringAttr("user-789"),
 		"blobId":    newStringAttr("blob-999"),
 		"s3Key":     newStringAttr("user-789/blob-999"),
+		"size":      newNumberAttr(2048),
 		"deletedAt": newStringAttr("2024-06-02T00:00:00Z"),
 	}
 	oldImg2 := map[string]events.DynamoDBAttributeValue{
@@ -327,6 +337,7 @@ func TestCleanup_MultipleRecords_AllProcessed(t *testing.T) {
 		"accountId": newStringAttr("user-789"),
 		"blobId":    newStringAttr("blob-999"),
 		"s3Key":     newStringAttr("user-789/blob-999"),
+		"size":      newNumberAttr(2048),
 	}
 
 	event := events.DynamoDBEvent{

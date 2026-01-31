@@ -115,13 +115,16 @@ resource "aws_iam_role_policy" "jmap_api_cloudwatch_metrics" {
   policy = data.aws_iam_policy_document.cloudwatch_metrics.json
 }
 
-# IAM policy for DynamoDB access (Query for plugins + read operations)
+# IAM policy for DynamoDB access (Query for plugins + read/write operations for Blob/allocate)
 data "aws_iam_policy_document" "jmap_api_dynamodb" {
   statement {
     effect = "Allow"
     actions = [
       "dynamodb:GetItem",
-      "dynamodb:Query"
+      "dynamodb:Query",
+      "dynamodb:TransactWriteItems", # For Blob/allocate transactions
+      "dynamodb:UpdateItem",         # Required for Update operations within transactions
+      "dynamodb:PutItem",            # Required for Put operations within transactions
     ]
     resources = [aws_dynamodb_table.jmap_data.arn]
   }
@@ -149,4 +152,22 @@ resource "aws_iam_role_policy" "jmap_api_lambda_invoke" {
   name   = "${local.resource_prefix}-jmap-api-lambda-invoke-${var.environment}"
   role   = aws_iam_role.jmap_api_execution.id
   policy = data.aws_iam_policy_document.jmap_api_lambda_invoke.json
+}
+
+# IAM policy for S3 presigning (for Blob/allocate PUT URLs)
+data "aws_iam_policy_document" "jmap_api_s3_presign" {
+  statement {
+    effect = "Allow"
+    actions = [
+      "s3:PutObject",
+      "s3:PutObjectTagging",
+    ]
+    resources = ["${aws_s3_bucket.blobs.arn}/*"]
+  }
+}
+
+resource "aws_iam_role_policy" "jmap_api_s3_presign" {
+  name   = "${local.resource_prefix}-jmap-api-s3-presign-${var.environment}"
+  role   = aws_iam_role.jmap_api_execution.id
+  policy = data.aws_iam_policy_document.jmap_api_s3_presign.json
 }

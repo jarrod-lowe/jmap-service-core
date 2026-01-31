@@ -24,6 +24,12 @@ resource "aws_dynamodb_table_item" "core_plugin" {
             collationAlgorithms   = { L = [{ S = "i;ascii-casemap" }] }
           }
         }
+        "https://jmap.rrod.net/extensions/upload-put" = {
+          M = {
+            maxSizeUploadPut      = { N = tostring(var.max_size_upload_put) }
+            maxPendingAllocations = { N = tostring(var.max_pending_allocations) }
+          }
+        }
       }
     }
     methods = {
