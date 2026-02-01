@@ -313,3 +313,355 @@ This is query test email number {i}.
         """Verify test data was set up correctly."""
         assert len(query_data["email_ids"]) == 3
         assert query_data["mailbox_id"] is not None
+
+
+class TestEmailBodyValues:
+    """Tests for Email bodyValues property per RFC 8621."""
+
+    @pytest.fixture(scope="class")
+    def body_values_data(self, api_url, upload_url, token, account_id):
+        """Set up test emails for bodyValues testing."""
+        mailbox_id = create_test_mailbox(api_url, token, account_id)
+        assert mailbox_id, "Failed to create test mailbox"
+
+        email_ids = {}
+
+        # Email 1: Multipart/alternative with text/plain and text/html
+        unique_id = str(uuid.uuid4())
+        message_id_multipart = f"<body-values-multipart-{unique_id}@jmap-test.example>"
+        date_str = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S %z")
+
+        multipart_email = f"""From: Body Values Test <sender@example.com>
+To: Test Recipient <recipient@example.com>
+Subject: Body Values Multipart Test
+Date: {date_str}
+Message-ID: {message_id_multipart}
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="boundary123"
+
+--boundary123
+Content-Type: text/plain; charset=utf-8
+
+This is the plain text body content for bodyValues testing.
+--boundary123
+Content-Type: text/html; charset=utf-8
+
+<html><body><p>This is the HTML body content.</p></body></html>
+--boundary123--
+""".replace("\n", "\r\n")
+
+        blob_id = upload_email_blob(upload_url, token, account_id, multipart_email)
+        assert blob_id, "Failed to upload multipart email"
+
+        import_call = [
+            "Email/import",
+            {
+                "accountId": account_id,
+                "emails": {
+                    "email": {
+                        "blobId": blob_id,
+                        "mailboxIds": {mailbox_id: True},
+                        "receivedAt": datetime.now(timezone.utc).strftime(
+                            "%Y-%m-%dT%H:%M:%SZ"
+                        ),
+                    }
+                },
+            },
+            "importMultipart",
+        ]
+
+        import_response = make_jmap_request(api_url, token, [import_call])
+        assert "methodResponses" in import_response, (
+            f"No methodResponses: {import_response}"
+        )
+        response_name, response_data, _ = import_response["methodResponses"][0]
+        assert response_name == "Email/import", f"Unexpected: {response_name}"
+        created = response_data.get("created", {})
+        assert "email" in created, f"Multipart email not created: {response_data}"
+        email_ids["multipart"] = created["email"]["id"]
+
+        # Email 2: Invalid charset for encoding problem test
+        unique_id2 = str(uuid.uuid4())
+        message_id_invalid = f"<body-values-invalid-{unique_id2}@jmap-test.example>"
+
+        invalid_charset_email = f"""From: Invalid Charset Test <sender@example.com>
+To: Test Recipient <recipient@example.com>
+Subject: Invalid Charset Test
+Date: {date_str}
+Message-ID: {message_id_invalid}
+MIME-Version: 1.0
+Content-Type: text/plain; charset=bogus-nonexistent-charset
+
+Some text content with invalid charset declaration.
+""".replace("\n", "\r\n")
+
+        blob_id2 = upload_email_blob(upload_url, token, account_id, invalid_charset_email)
+        assert blob_id2, "Failed to upload invalid charset email"
+
+        import_call2 = [
+            "Email/import",
+            {
+                "accountId": account_id,
+                "emails": {
+                    "email": {
+                        "blobId": blob_id2,
+                        "mailboxIds": {mailbox_id: True},
+                        "receivedAt": datetime.now(timezone.utc).strftime(
+                            "%Y-%m-%dT%H:%M:%SZ"
+                        ),
+                    }
+                },
+            },
+            "importInvalidCharset",
+        ]
+
+        import_response2 = make_jmap_request(api_url, token, [import_call2])
+        assert "methodResponses" in import_response2, (
+            f"No methodResponses: {import_response2}"
+        )
+        response_name2, response_data2, _ = import_response2["methodResponses"][0]
+        assert response_name2 == "Email/import", f"Unexpected: {response_name2}"
+        created2 = response_data2.get("created", {})
+        assert "email" in created2, f"Invalid charset email not created: {response_data2}"
+        email_ids["invalid_charset"] = created2["email"]["id"]
+
+        data = {
+            "mailbox_id": mailbox_id,
+            "email_ids": email_ids,
+            "account_id": account_id,
+        }
+
+        yield data
+
+        # Cleanup
+        all_email_ids = list(email_ids.values())
+        destroy_emails_and_verify_cleanup(api_url, token, account_id, all_email_ids)
+        result = destroy_mailbox(
+            api_url, token, account_id, mailbox_id, on_destroy_remove_emails=True
+        )
+        assert result.get("methodName") == "Mailbox/set", f"Unexpected: {result}"
+        assert mailbox_id in result.get("destroyed", []), (
+            f"Mailbox not destroyed: {result}"
+        )
+
+    def test_fetch_text_body_values(self, body_values_data, api_url, token, account_id):
+        """Test fetchTextBodyValues returns plain text body content."""
+        email_id = body_values_data["email_ids"]["multipart"]
+
+        email_get_call = [
+            "Email/get",
+            {
+                "accountId": account_id,
+                "ids": [email_id],
+                "properties": ["id", "bodyValues", "textBody"],
+                "fetchTextBodyValues": True,
+            },
+            "getTextBody",
+        ]
+
+        response = make_jmap_request(api_url, token, [email_get_call])
+        assert "methodResponses" in response, f"No methodResponses: {response}"
+
+        resp_name, resp_data, _ = response["methodResponses"][0]
+        assert resp_name == "Email/get", f"Unexpected method: {resp_name}"
+
+        emails = resp_data.get("list", [])
+        assert len(emails) == 1, f"Expected 1 email, got {len(emails)}"
+
+        email = emails[0]
+        body_values = email.get("bodyValues", {})
+        assert body_values, "bodyValues is empty or missing"
+
+        # Find the text body part ID
+        text_body = email.get("textBody", [])
+        assert text_body, "textBody is empty or missing"
+        text_part_id = text_body[0].get("partId")
+        assert text_part_id, "No partId in textBody"
+
+        # Verify bodyValues contains the text part
+        assert text_part_id in body_values, (
+            f"partId {text_part_id} not in bodyValues: {body_values.keys()}"
+        )
+
+        body_value = body_values[text_part_id]
+        assert "value" in body_value, f"No 'value' in bodyValue: {body_value}"
+        assert "plain text body content" in body_value["value"], (
+            f"Expected text content not found: {body_value['value']}"
+        )
+
+        # Verify flags
+        assert body_value.get("isEncodingProblem", False) is False, (
+            "isEncodingProblem should be False"
+        )
+        assert body_value.get("isTruncated", False) is False, (
+            "isTruncated should be False"
+        )
+
+    def test_fetch_html_body_values(self, body_values_data, api_url, token, account_id):
+        """Test fetchHTMLBodyValues returns HTML body content."""
+        email_id = body_values_data["email_ids"]["multipart"]
+
+        email_get_call = [
+            "Email/get",
+            {
+                "accountId": account_id,
+                "ids": [email_id],
+                "properties": ["id", "bodyValues", "htmlBody"],
+                "fetchHTMLBodyValues": True,
+            },
+            "getHtmlBody",
+        ]
+
+        response = make_jmap_request(api_url, token, [email_get_call])
+        assert "methodResponses" in response, f"No methodResponses: {response}"
+
+        resp_name, resp_data, _ = response["methodResponses"][0]
+        assert resp_name == "Email/get", f"Unexpected method: {resp_name}"
+
+        emails = resp_data.get("list", [])
+        assert len(emails) == 1, f"Expected 1 email, got {len(emails)}"
+
+        email = emails[0]
+        body_values = email.get("bodyValues", {})
+        assert body_values, "bodyValues is empty or missing"
+
+        # Find the HTML body part ID
+        html_body = email.get("htmlBody", [])
+        assert html_body, "htmlBody is empty or missing"
+        html_part_id = html_body[0].get("partId")
+        assert html_part_id, "No partId in htmlBody"
+
+        # Verify bodyValues contains the HTML part
+        assert html_part_id in body_values, (
+            f"partId {html_part_id} not in bodyValues: {body_values.keys()}"
+        )
+
+        body_value = body_values[html_part_id]
+        assert "value" in body_value, f"No 'value' in bodyValue: {body_value}"
+        assert "HTML body content" in body_value["value"], (
+            f"Expected HTML content not found: {body_value['value']}"
+        )
+
+    def test_max_body_value_bytes_truncation(
+        self, body_values_data, api_url, token, account_id
+    ):
+        """Test maxBodyValueBytes truncates content and sets isTruncated flag."""
+        email_id = body_values_data["email_ids"]["multipart"]
+        max_bytes = 20
+
+        email_get_call = [
+            "Email/get",
+            {
+                "accountId": account_id,
+                "ids": [email_id],
+                "properties": ["id", "bodyValues", "textBody"],
+                "fetchTextBodyValues": True,
+                "maxBodyValueBytes": max_bytes,
+            },
+            "getTruncatedBody",
+        ]
+
+        response = make_jmap_request(api_url, token, [email_get_call])
+        assert "methodResponses" in response, f"No methodResponses: {response}"
+
+        resp_name, resp_data, _ = response["methodResponses"][0]
+        assert resp_name == "Email/get", f"Unexpected method: {resp_name}"
+
+        emails = resp_data.get("list", [])
+        assert len(emails) == 1, f"Expected 1 email, got {len(emails)}"
+
+        email = emails[0]
+        body_values = email.get("bodyValues", {})
+        assert body_values, "bodyValues is empty or missing"
+
+        text_body = email.get("textBody", [])
+        assert text_body, "textBody is empty or missing"
+        text_part_id = text_body[0].get("partId")
+
+        body_value = body_values.get(text_part_id, {})
+        assert body_value.get("isTruncated") is True, (
+            f"isTruncated should be True: {body_value}"
+        )
+
+        # Verify value length does not exceed maxBodyValueBytes
+        value = body_value.get("value", "")
+        assert len(value.encode("utf-8")) <= max_bytes, (
+            f"Value length {len(value.encode('utf-8'))} exceeds max {max_bytes}"
+        )
+
+    def test_body_values_without_fetch_flags(
+        self, body_values_data, api_url, token, account_id
+    ):
+        """Test bodyValues is empty when no fetch flags are set."""
+        email_id = body_values_data["email_ids"]["multipart"]
+
+        email_get_call = [
+            "Email/get",
+            {
+                "accountId": account_id,
+                "ids": [email_id],
+                "properties": ["id", "bodyValues"],
+                # No fetchTextBodyValues or fetchHTMLBodyValues
+            },
+            "getNoFetchFlags",
+        ]
+
+        response = make_jmap_request(api_url, token, [email_get_call])
+        assert "methodResponses" in response, f"No methodResponses: {response}"
+
+        resp_name, resp_data, _ = response["methodResponses"][0]
+        assert resp_name == "Email/get", f"Unexpected method: {resp_name}"
+
+        emails = resp_data.get("list", [])
+        assert len(emails) == 1, f"Expected 1 email, got {len(emails)}"
+
+        email = emails[0]
+        body_values = email.get("bodyValues", {})
+
+        # bodyValues should be empty when no fetch flags are set
+        assert body_values == {}, (
+            f"bodyValues should be empty without fetch flags: {body_values}"
+        )
+
+    def test_encoding_problem(self, body_values_data, api_url, token, account_id):
+        """Test isEncodingProblem flag when charset is invalid/undecodable."""
+        email_id = body_values_data["email_ids"]["invalid_charset"]
+
+        email_get_call = [
+            "Email/get",
+            {
+                "accountId": account_id,
+                "ids": [email_id],
+                "properties": ["id", "bodyValues", "textBody"],
+                "fetchTextBodyValues": True,
+            },
+            "getEncodingProblem",
+        ]
+
+        response = make_jmap_request(api_url, token, [email_get_call])
+        assert "methodResponses" in response, f"No methodResponses: {response}"
+
+        resp_name, resp_data, _ = response["methodResponses"][0]
+        assert resp_name == "Email/get", f"Unexpected method: {resp_name}"
+
+        emails = resp_data.get("list", [])
+        assert len(emails) == 1, f"Expected 1 email, got {len(emails)}"
+
+        email = emails[0]
+        body_values = email.get("bodyValues", {})
+        assert body_values, "bodyValues is empty or missing"
+
+        text_body = email.get("textBody", [])
+        assert text_body, "textBody is empty or missing"
+        text_part_id = text_body[0].get("partId")
+
+        body_value = body_values.get(text_part_id, {})
+
+        # isEncodingProblem should be True for invalid charset
+        assert body_value.get("isEncodingProblem") is True, (
+            f"isEncodingProblem should be True for invalid charset: {body_value}"
+        )
+
+        # value should still contain best-effort decoded content
+        value = body_value.get("value", "")
+        assert value, "value should contain best-effort decoded content"
