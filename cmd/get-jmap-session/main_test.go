@@ -244,12 +244,17 @@ func TestHandler_RFC8620RequiredFields(t *testing.T) {
 		t.Error("uploadUrl is required")
 	}
 
-	if session.EventSourceUrl == "" {
-		t.Error("eventSourceUrl is required")
-	}
-
 	if session.State == "" {
 		t.Error("state is required")
+	}
+
+	// RFC 8620: eventSourceUrl is omitted when SSE is not supported
+	var rawSession map[string]any
+	if err := json.Unmarshal([]byte(response.Body), &rawSession); err != nil {
+		t.Fatalf("failed to unmarshal raw session: %v", err)
+	}
+	if _, exists := rawSession["eventSourceUrl"]; exists {
+		t.Error("eventSourceUrl should be omitted when SSE is not supported")
 	}
 }
 
@@ -343,9 +348,9 @@ func TestBuildSession_WithInjectedConfig(t *testing.T) {
 		t.Errorf("expected uploadUrl '%s', got '%s'", expectedUploadUrl, session.UploadUrl)
 	}
 
-	expectedEventSourceUrl := "https://test.example.com/v1/not-implemented/events/{types}/{closeafter}/{ping}"
-	if session.EventSourceUrl != expectedEventSourceUrl {
-		t.Errorf("expected eventSourceUrl '%s', got '%s'", expectedEventSourceUrl, session.EventSourceUrl)
+	// Verify eventSourceUrl is empty (omitted from JSON when SSE not supported)
+	if session.EventSourceUrl != "" {
+		t.Errorf("expected eventSourceUrl to be empty, got '%s'", session.EventSourceUrl)
 	}
 
 	// Verify user ID is used correctly

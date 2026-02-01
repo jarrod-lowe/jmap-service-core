@@ -43,7 +43,7 @@ type JMAPSession struct {
 	APIUrl          string             `json:"apiUrl"`
 	DownloadUrl     string             `json:"downloadUrl"`
 	UploadUrl       string             `json:"uploadUrl"`
-	EventSourceUrl  string             `json:"eventSourceUrl"`
+	EventSourceUrl  string             `json:"eventSourceUrl,omitempty"`
 	State           string             `json:"state"`
 }
 
@@ -210,7 +210,6 @@ func buildSession(userID string, cfg Config, registry *plugin.Registry) JMAPSess
 		APIUrl:          fmt.Sprintf("%s/jmap", baseURL),
 		DownloadUrl:     fmt.Sprintf("%s/download/{accountId}/{blobId}", baseURL),
 		UploadUrl:       fmt.Sprintf("%s/upload/{accountId}", baseURL),
-		EventSourceUrl:  fmt.Sprintf("%s/not-implemented/events/{types}/{closeafter}/{ping}", baseURL),
 		State:           "0",
 	}
 }

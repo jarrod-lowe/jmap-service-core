@@ -9,8 +9,15 @@ from uuid import uuid4
 
 import boto3
 import jmapc
+import jmapc.session
 import pytest
 import requests
+
+# Monkey-patch jmapc.Session to make event_source_url optional
+# RFC 8620 allows omitting eventSourceUrl when SSE is not supported
+from typing import Optional
+jmapc.session.Session.__dataclass_fields__['event_source_url'].default = None
+jmapc.session.Session.__dataclass_fields__['event_source_url'].type = Optional[str]
 
 
 @dataclass
