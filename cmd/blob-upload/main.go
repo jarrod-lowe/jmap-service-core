@@ -22,6 +22,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/jarrod-lowe/jmap-service-core/internal/db"
 	"github.com/jarrod-lowe/jmap-service-core/internal/plugin"
+	"github.com/jarrod-lowe/jmap-service-core/internal/tracing"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda/xrayconfig"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
+	"go.opentelemetry.io/otel"
 )
 
 var (
@@ -104,6 +109,12 @@ var deps *Dependencies
 
 // handler processes blob upload requests
 func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Response, error) {
+	ctx, span := tracing.StartHandlerSpan(ctx, "BlobUploadHandler",
+		tracing.Function("blob-upload"),
+		tracing.RequestID(request.RequestContext.RequestID),
+	)
+	defer span.End()
+
 	// Extract accountId
 	accountID, err := extractAccountID(request)
 	if err != nil {
@@ -113,6 +124,7 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 		)
 		return errorResponse(401, "unauthorized", "Missing or invalid authentication")
 	}
+	span.SetAttributes(tracing.AccountID(accountID))
 
 	// Check principal authorization for IAM-authenticated requests
 	if isIAMAuthenticatedRequest(request) {
@@ -157,6 +169,7 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 
 	// Generate blobId
 	blobID := deps.UUIDGen.Generate()
+	span.SetAttributes(tracing.BlobID(blobID))
 	s3Key := fmt.Sprintf("%s/%s", accountID, blobID)
 
 	// Upload to S3 with pending status
@@ -445,6 +458,20 @@ func (r *RealUUIDGenerator) Generate() string {
 func main() {
 	ctx := context.Background()
 
+	// Initialize tracer provider
+	tp, err := tracing.Init(ctx)
+	if err != nil {
+		logger.Error("FATAL: Failed to initialize tracer provider",
+			slog.String("error", err.Error()),
+		)
+		panic(err)
+	}
+	otel.SetTracerProvider(tp)
+
+	// Create cold start span - all init AWS calls become children
+	ctx, coldStartSpan := tracing.StartColdStartSpan(ctx, "blob-upload")
+	defer coldStartSpan.End()
+
 	// Get required environment variables
 	tableName := os.Getenv("DYNAMODB_TABLE")
 	if tableName == "" {
@@ -466,6 +493,7 @@ func main() {
 		)
 		panic(err)
 	}
+	otelaws.AppendMiddlewares(&cfg.APIOptions)
 
 	s3Client := s3.NewFromConfig(cfg)
 	dynamoClient := dynamodb.NewFromConfig(cfg)
@@ -495,5 +523,5 @@ func main() {
 		Registry: registry,
 	}
 
-	lambda.Start(handler)
+	lambda.Start(otellambda.InstrumentHandler(handler, xrayconfig.WithRecommendedOptions(tp)...))
 }

@@ -11,10 +11,10 @@ import (
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/jarrod-lowe/jmap-service-core/internal/db"
 	"github.com/jarrod-lowe/jmap-service-core/internal/plugin"
+	"github.com/jarrod-lowe/jmap-service-core/internal/tracing"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda/xrayconfig"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 )
 
 var (
@@ -79,14 +79,11 @@ func LoadConfig() Config {
 var config = LoadConfig()
 
 func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Response, error) {
-	tracer := otel.Tracer("jmap-get-session")
-	ctx, span := tracer.Start(ctx, "GetJmapSessionHandler")
-	defer span.End()
-
-	span.SetAttributes(
-		attribute.String("function", "get-jmap-session"),
-		attribute.String("request_id", request.RequestContext.RequestID),
+	ctx, span := tracing.StartHandlerSpan(ctx, "GetJmapSessionHandler",
+		tracing.Function("get-jmap-session"),
+		tracing.RequestID(request.RequestContext.RequestID),
 	)
+	defer span.End()
 
 	// Extract sub claim from Cognito authorizer
 	userID, err := extractSubClaim(request)
@@ -102,7 +99,7 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 		}, nil
 	}
 
-	span.SetAttributes(attribute.String("account_id", userID))
+	span.SetAttributes(tracing.AccountID(userID))
 
 	logger.InfoContext(ctx, "Processing session request",
 		slog.String("request_id", request.RequestContext.RequestID),
@@ -217,7 +214,7 @@ func buildSession(userID string, cfg Config, registry *plugin.Registry) JMAPSess
 func main() {
 	ctx := context.Background()
 
-	tp, err := xrayconfig.NewTracerProvider(ctx)
+	tp, err := tracing.Init(ctx)
 	if err != nil {
 		logger.Error("FATAL: Failed to initialize tracer provider",
 			slog.String("error", err.Error()),
@@ -225,6 +222,10 @@ func main() {
 		panic(err)
 	}
 	otel.SetTracerProvider(tp)
+
+	// Create cold start span - all init AWS calls become children
+	ctx, coldStartSpan := tracing.StartColdStartSpan(ctx, "get-jmap-session")
+	defer coldStartSpan.End()
 
 	// Initialize DynamoDB client with OTel instrumentation
 	tableName := os.Getenv("DYNAMODB_TABLE")

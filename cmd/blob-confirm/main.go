@@ -17,6 +17,12 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/jarrod-lowe/jmap-service-core/internal/tracing"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda/xrayconfig"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 var (
@@ -47,8 +53,17 @@ var deps *Dependencies
 
 // handler processes S3 ObjectCreated events to confirm blob uploads
 func handler(ctx context.Context, event events.S3Event) error {
+	ctx, span := tracing.StartHandlerSpan(ctx, "BlobConfirmHandler",
+		tracing.Function("blob-confirm"),
+	)
+	defer span.End()
+
 	for _, record := range event.Records {
 		key := record.S3.Object.Key
+		span.SetAttributes(
+			attribute.String("s3.bucket", record.S3.Bucket.Name),
+			attribute.String("s3.key", key),
+		)
 		logger.InfoContext(ctx, "Processing S3 event",
 			slog.String("bucket", record.S3.Bucket.Name),
 			slog.String("key", key),
@@ -63,6 +78,7 @@ func handler(ctx context.Context, event events.S3Event) error {
 			)
 			return fmt.Errorf("invalid S3 key format: %w", err)
 		}
+		span.SetAttributes(tracing.AccountID(accountID), tracing.BlobID(blobID))
 
 		// Check blob record status
 		status, err := deps.DB.GetBlobStatus(ctx, accountID, blobID)
@@ -298,6 +314,20 @@ func (d *DynamoDBConfirmStore) ConfirmBlob(ctx context.Context, accountID, blobI
 func main() {
 	ctx := context.Background()
 
+	// Initialize tracer provider
+	tp, err := tracing.Init(ctx)
+	if err != nil {
+		logger.Error("FATAL: Failed to initialize tracer provider",
+			slog.String("error", err.Error()),
+		)
+		panic(err)
+	}
+	otel.SetTracerProvider(tp)
+
+	// Create cold start span - all init AWS calls become children
+	ctx, coldStartSpan := tracing.StartColdStartSpan(ctx, "blob-confirm")
+	defer coldStartSpan.End()
+
 	// Get required environment variables
 	tableName := os.Getenv("DYNAMODB_TABLE")
 	if tableName == "" {
@@ -319,6 +349,7 @@ func main() {
 		)
 		panic(err)
 	}
+	otelaws.AppendMiddlewares(&cfg.APIOptions)
 
 	s3Client := s3.NewFromConfig(cfg)
 	dynamoClient := dynamodb.NewFromConfig(cfg)
@@ -328,5 +359,5 @@ func main() {
 		DB:      NewDynamoDBConfirmStore(dynamoClient, tableName),
 	}
 
-	lambda.Start(handler)
+	lambda.Start(otellambda.InstrumentHandler(handler, xrayconfig.WithRecommendedOptions(tp)...))
 }

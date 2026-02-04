@@ -19,11 +19,11 @@ import (
 	"github.com/jarrod-lowe/jmap-service-core/internal/db"
 	"github.com/jarrod-lowe/jmap-service-core/internal/plugin"
 	"github.com/jarrod-lowe/jmap-service-core/internal/resultref"
+	"github.com/jarrod-lowe/jmap-service-core/internal/tracing"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda/xrayconfig"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 )
 
 var (
@@ -64,14 +64,11 @@ var deps *Dependencies
 
 // handler processes JMAP requests
 func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Response, error) {
-	tracer := otel.Tracer("jmap-api")
-	ctx, span := tracer.Start(ctx, "JmapApiHandler")
-	defer span.End()
-
-	span.SetAttributes(
-		attribute.String("function", "jmap-api"),
-		attribute.String("request_id", request.RequestContext.RequestID),
+	ctx, span := tracing.StartHandlerSpan(ctx, "JmapApiHandler",
+		tracing.Function("jmap-api"),
+		tracing.RequestID(request.RequestContext.RequestID),
 	)
+	defer span.End()
 
 	// Extract accountId from request (JWT sub or path param)
 	accountID, err := extractAccountID(request)
@@ -87,7 +84,7 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 		}, nil
 	}
 
-	span.SetAttributes(attribute.String("account_id", accountID))
+	span.SetAttributes(tracing.AccountID(accountID))
 
 	// Check principal authorization for IAM-authenticated requests
 	if isIAMAuthenticatedRequest(request) {
@@ -202,6 +199,19 @@ const UploadPutCapability = "https://jmap.rrod.net/extensions/upload-put"
 
 // processMethodCall dispatches a method call to the appropriate plugin
 func processMethodCall(ctx context.Context, accountID string, call []any, index int, requestID string, previousResponses []resultref.MethodResponse, usingCaps []string) []any {
+	// Extract method name and clientID early for span attributes
+	var methodName, clientID string
+	if len(call) >= 1 {
+		methodName, _ = call[0].(string)
+	}
+	if len(call) >= 3 {
+		clientID, _ = call[2].(string)
+	}
+
+	// Create span for this method call
+	ctx, span := tracing.StartMethodSpan(ctx, "jmap-api", methodName, clientID, index)
+	defer span.End()
+
 	// Validate call structure: [methodName, args, clientId]
 	if len(call) != 3 {
 		return []any{"error", map[string]any{
@@ -210,8 +220,7 @@ func processMethodCall(ctx context.Context, accountID string, call []any, index 
 		}, ""}
 	}
 
-	methodName, ok := call[0].(string)
-	if !ok {
+	if methodName == "" {
 		return []any{"error", map[string]any{
 			"type":        "invalidArguments",
 			"description": "Method name must be a string",
@@ -226,14 +235,10 @@ func processMethodCall(ctx context.Context, accountID string, call []any, index 
 		}, methodName}
 	}
 
-	clientID, ok := call[2].(string)
-	if !ok {
-		clientID = ""
-	}
-
 	// Resolve result references (RFC 8620 Section 3.7)
 	resolvedArgs, err := resultref.ResolveArgs(args, previousResponses)
 	if err != nil {
+		tracing.RecordError(span, err)
 		resolveErr, ok := err.(*resultref.ResolveError)
 		if ok {
 			return []any{"error", map[string]any{
@@ -283,6 +288,7 @@ func processMethodCall(ctx context.Context, accountID string, call []any, index 
 	// Invoke plugin
 	pluginResp, err := deps.Invoker.Invoke(ctx, *target, pluginReq)
 	if err != nil {
+		tracing.RecordError(span, err)
 		logger.ErrorContext(ctx, "Plugin invocation failed",
 			slog.String("method", methodName),
 			slog.String("error", err.Error()),
@@ -459,7 +465,7 @@ func (r *RealUUIDGenerator) Generate() string {
 func main() {
 	ctx := context.Background()
 
-	tp, err := xrayconfig.NewTracerProvider(ctx)
+	tp, err := tracing.Init(ctx)
 	if err != nil {
 		logger.Error("FATAL: Failed to initialize tracer provider",
 			slog.String("error", err.Error()),
@@ -467,6 +473,10 @@ func main() {
 		panic(err)
 	}
 	otel.SetTracerProvider(tp)
+
+	// Create cold start span - all init AWS calls become children
+	ctx, coldStartSpan := tracing.StartColdStartSpan(ctx, "jmap-api")
+	defer coldStartSpan.End()
 
 	// Initialize DynamoDB client
 	tableName := os.Getenv("DYNAMODB_TABLE")

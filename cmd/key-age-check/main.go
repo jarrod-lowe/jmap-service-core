@@ -13,6 +13,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	"github.com/jarrod-lowe/jmap-service-core/internal/tracing"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda/xrayconfig"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
+	"go.opentelemetry.io/otel"
 )
 
 var (
@@ -144,6 +149,20 @@ func (p *CloudWatchMetricsPublisher) PublishMetric(ctx context.Context, name str
 func main() {
 	ctx := context.Background()
 
+	// Initialize tracer provider
+	tp, err := tracing.Init(ctx)
+	if err != nil {
+		logger.Error("FATAL: Failed to initialize tracer provider",
+			slog.String("error", err.Error()),
+		)
+		panic(err)
+	}
+	otel.SetTracerProvider(tp)
+
+	// Create cold start span - all init AWS calls become children
+	ctx, coldStartSpan := tracing.StartColdStartSpan(ctx, "key-age-check")
+	defer coldStartSpan.End()
+
 	// Get required environment variables
 	ssmParameterName := os.Getenv("SSM_PARAMETER_NAME")
 	if ssmParameterName == "" {
@@ -165,6 +184,7 @@ func main() {
 		)
 		panic(err)
 	}
+	otelaws.AppendMiddlewares(&cfg.APIOptions)
 
 	ssmClient := ssm.NewFromConfig(cfg)
 	cwClient := cloudwatch.NewFromConfig(cfg)
@@ -178,5 +198,5 @@ func main() {
 		},
 	}
 
-	lambda.Start(handler)
+	lambda.Start(otellambda.InstrumentHandler(handler, xrayconfig.WithRecommendedOptions(tp)...))
 }

@@ -24,6 +24,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/jarrod-lowe/jmap-service-core/internal/db"
 	"github.com/jarrod-lowe/jmap-service-core/internal/plugin"
+	"github.com/jarrod-lowe/jmap-service-core/internal/tracing"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda/xrayconfig"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
+	"go.opentelemetry.io/otel"
 )
 
 var (
@@ -150,17 +155,25 @@ var deps *Dependencies
 
 // handler processes blob download requests
 func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Response, error) {
+	ctx, span := tracing.StartHandlerSpan(ctx, "BlobDownloadHandler",
+		tracing.Function("blob-download"),
+		tracing.RequestID(request.RequestContext.RequestID),
+	)
+	defer span.End()
+
 	// Extract accountId from path
 	pathAccountID := request.PathParameters["accountId"]
 	if pathAccountID == "" {
 		return errorResponse(400, "invalidArguments", "Missing accountId in path")
 	}
+	span.SetAttributes(tracing.AccountID(pathAccountID))
 
 	// Extract blobId from path
 	blobID := request.PathParameters["blobId"]
 	if blobID == "" {
 		return errorResponse(400, "invalidArguments", "Missing blobId in path")
 	}
+	span.SetAttributes(tracing.BlobID(blobID))
 
 	// Parse blobId (may be composite: baseBlobId,startByte,endByte)
 	parsedBlobID, err := ParseBlobID(blobID)
@@ -449,6 +462,20 @@ func (s *SecretsManagerReader) GetPrivateKey(ctx context.Context, secretARN stri
 func main() {
 	ctx := context.Background()
 
+	// Initialize tracer provider
+	tp, err := tracing.Init(ctx)
+	if err != nil {
+		logger.Error("FATAL: Failed to initialize tracer provider",
+			slog.String("error", err.Error()),
+		)
+		panic(err)
+	}
+	otel.SetTracerProvider(tp)
+
+	// Create cold start span - all init AWS calls become children
+	ctx, coldStartSpan := tracing.StartColdStartSpan(ctx, "blob-download")
+	defer coldStartSpan.End()
+
 	// Get required environment variables
 	tableName := os.Getenv("DYNAMODB_TABLE")
 	if tableName == "" {
@@ -489,6 +516,7 @@ func main() {
 		)
 		panic(err)
 	}
+	otelaws.AppendMiddlewares(&cfg.APIOptions)
 
 	dynamoClient := dynamodb.NewFromConfig(cfg)
 	secretsClient := secretsmanager.NewFromConfig(cfg)
@@ -543,5 +571,5 @@ func main() {
 		},
 	}
 
-	lambda.Start(handler)
+	lambda.Start(otellambda.InstrumentHandler(handler, xrayconfig.WithRecommendedOptions(tp)...))
 }
