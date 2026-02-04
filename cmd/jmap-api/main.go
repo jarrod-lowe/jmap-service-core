@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jarrod-lowe/jmap-service-core/internal/bloballocate"
 	"github.com/jarrod-lowe/jmap-service-core/internal/db"
+	"github.com/jarrod-lowe/jmap-service-core/internal/dispatcher"
 	"github.com/jarrod-lowe/jmap-service-core/internal/plugin"
 	"github.com/jarrod-lowe/jmap-service-core/internal/resultref"
 	"github.com/jarrod-lowe/jmap-service-libs/tracing"
@@ -53,11 +54,15 @@ type Response struct {
 	Body       string            `json:"body"`
 }
 
+// DefaultDispatcherPoolSize is the default number of concurrent workers for method dispatch
+const DefaultDispatcherPoolSize = 4
+
 // Dependencies for handler (injectable for testing)
 type Dependencies struct {
-	Registry       *plugin.Registry
-	Invoker        plugin.Invoker
-	BlobAllocator  *bloballocate.Handler
+	Registry             *plugin.Registry
+	Invoker              plugin.Invoker
+	BlobAllocator        *bloballocate.Handler
+	DispatcherPoolSize   int
 }
 
 var deps *Dependencies
@@ -127,15 +132,20 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 		}
 	}
 
-	// Process method calls with result reference tracking
-	methodResponses := make([][]any, 0, len(jmapReq.MethodCalls))
-	trackedResponses := make([]resultref.MethodResponse, 0, len(jmapReq.MethodCalls))
-	for i, call := range jmapReq.MethodCalls {
-		resp := processMethodCall(ctx, accountID, call, i, request.RequestContext.RequestID, trackedResponses, jmapReq.Using)
-		methodResponses = append(methodResponses, resp)
-		// Track response for future result references
-		trackedResponses = append(trackedResponses, toMethodResponse(resp))
+	// Process method calls in parallel with dependency tracking
+	processor := &JMAPCallProcessor{
+		AccountID: accountID,
+		RequestID: request.RequestContext.RequestID,
+		UsingCaps: jmapReq.Using,
 	}
+
+	cfg := dispatcher.Config{
+		Calls:     jmapReq.MethodCalls,
+		PoolSize:  deps.DispatcherPoolSize,
+		Processor: processor,
+	}
+
+	methodResponses := dispatcher.Execute(ctx, cfg)
 
 	// Build response
 	jmapResp := JMAPResponse{
@@ -196,6 +206,18 @@ func extractAccountID(request events.APIGatewayProxyRequest) (string, error) {
 
 // UploadPutCapability is the capability URN for the PUT upload extension
 const UploadPutCapability = "https://jmap.rrod.net/extensions/upload-put"
+
+// JMAPCallProcessor implements dispatcher.CallProcessor for JMAP method calls
+type JMAPCallProcessor struct {
+	AccountID string
+	RequestID string
+	UsingCaps []string
+}
+
+// Process implements dispatcher.CallProcessor
+func (p *JMAPCallProcessor) Process(ctx context.Context, idx int, call []any, depResponses []resultref.MethodResponse) []any {
+	return processMethodCall(ctx, p.AccountID, call, idx, p.RequestID, depResponses, p.UsingCaps)
+}
 
 // processMethodCall dispatches a method call to the appropriate plugin
 func processMethodCall(ctx context.Context, accountID string, call []any, index int, requestID string, previousResponses []resultref.MethodResponse, usingCaps []string) []any {
@@ -304,29 +326,6 @@ func processMethodCall(ctx context.Context, accountID string, call []any, index 
 		pluginResp.MethodResponse.Name,
 		pluginResp.MethodResponse.Args,
 		pluginResp.MethodResponse.ClientID,
-	}
-}
-
-// toMethodResponse converts a JMAP method response array to a MethodResponse struct for tracking
-func toMethodResponse(resp []any) resultref.MethodResponse {
-	var name string
-	var args map[string]any
-	var clientID string
-
-	if len(resp) >= 1 {
-		name, _ = resp[0].(string)
-	}
-	if len(resp) >= 2 {
-		args, _ = resp[1].(map[string]any)
-	}
-	if len(resp) >= 3 {
-		clientID, _ = resp[2].(string)
-	}
-
-	return resultref.MethodResponse{
-		Name:     name,
-		Args:     args,
-		ClientID: clientID,
 	}
 }
 
@@ -548,10 +547,19 @@ func main() {
 		}
 	}
 
+	// Configure dispatcher pool size
+	dispatcherPoolSize := DefaultDispatcherPoolSize
+	if poolSizeStr := os.Getenv("JMAP_DISPATCHER_PARALLELISM"); poolSizeStr != "" {
+		if parsed, err := strconv.Atoi(poolSizeStr); err == nil && parsed > 0 {
+			dispatcherPoolSize = parsed
+		}
+	}
+
 	deps = &Dependencies{
-		Registry:      registry,
-		Invoker:       invoker,
-		BlobAllocator: blobAllocator,
+		Registry:           registry,
+		Invoker:            invoker,
+		BlobAllocator:      blobAllocator,
+		DispatcherPoolSize: dispatcherPoolSize,
 	}
 
 	lambda.Start(otellambda.InstrumentHandler(handler, xrayconfig.WithRecommendedOptions(tp)...))

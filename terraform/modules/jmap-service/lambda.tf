@@ -101,6 +101,9 @@ resource "aws_lambda_function" "jmap_api" {
       MAX_PENDING_ALLOCATIONS       = tostring(var.max_pending_allocations)
       ALLOCATION_URL_EXPIRY_SECONDS = tostring(var.allocation_url_expiry_seconds)
 
+      # Dispatcher configuration
+      JMAP_DISPATCHER_PARALLELISM = tostring(var.jmap_dispatcher_parallelism)
+
       # ADOT Collector Configuration
       OPENTELEMETRY_COLLECTOR_CONFIG_URI = "file:///var/task/collector.yaml"
       OPENTELEMETRY_EXTENSION_LOG_LEVEL  = "error"

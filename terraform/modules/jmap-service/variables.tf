@@ -144,6 +144,17 @@ variable "max_pending_allocations" {
   }
 }
 
+variable "jmap_dispatcher_parallelism" {
+  description = "Number of concurrent workers for parallel JMAP method dispatch. Higher values allow more parallel plugin invocations."
+  type        = number
+  default     = 4
+
+  validation {
+    condition     = var.jmap_dispatcher_parallelism >= 1 && var.jmap_dispatcher_parallelism <= 50
+    error_message = "Dispatcher parallelism must be between 1 and 50"
+  }
+}
+
 variable "default_quota_bytes" {
   description = "Default storage quota for new accounts in bytes"
   type        = number

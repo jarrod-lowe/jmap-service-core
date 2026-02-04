@@ -38,8 +38,9 @@ func setupTestDeps() {
 	// We'll use a helper to populate the registry
 
 	deps = &Dependencies{
-		Registry: registry,
-		Invoker:  &mockInvoker{},
+		Registry:           registry,
+		Invoker:            &mockInvoker{},
+		DispatcherPoolSize: DefaultDispatcherPoolSize,
 	}
 }
 
@@ -289,8 +290,9 @@ func setupTestDepsWithPrincipals(principals []string) {
 	registry := plugin.NewRegistryWithPrincipals(principals)
 
 	deps = &Dependencies{
-		Registry: registry,
-		Invoker:  &mockInvoker{},
+		Registry:           registry,
+		Invoker:            &mockInvoker{},
+		DispatcherPoolSize: DefaultDispatcherPoolSize,
 	}
 }
 
@@ -424,8 +426,9 @@ func setupTestDepsWithMethods(invoker *mockInvoker) {
 	})
 
 	deps = &Dependencies{
-		Registry: registry,
-		Invoker:  invoker,
+		Registry:           registry,
+		Invoker:            invoker,
+		DispatcherPoolSize: DefaultDispatcherPoolSize,
 	}
 }
 
