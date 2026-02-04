@@ -20,6 +20,7 @@ import (
 	"github.com/jarrod-lowe/jmap-service-core/internal/dispatcher"
 	"github.com/jarrod-lowe/jmap-service-core/internal/plugin"
 	"github.com/jarrod-lowe/jmap-service-core/internal/resultref"
+	"github.com/jarrod-lowe/jmap-service-libs/logging"
 	"github.com/jarrod-lowe/jmap-service-libs/tracing"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda/xrayconfig"
@@ -27,11 +28,7 @@ import (
 	"go.opentelemetry.io/otel"
 )
 
-var (
-	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))
-)
+var logger = logging.New()
 
 // JMAPRequest represents a JMAP request per RFC 8620
 type JMAPRequest struct {
