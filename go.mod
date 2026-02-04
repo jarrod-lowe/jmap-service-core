@@ -18,7 +18,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.42.21
 	github.com/aws/aws-sdk-go-v2/service/ssm v1.67.8
 	github.com/google/uuid v1.6.0
-	github.com/jarrod-lowe/jmap-service-libs v0.0.0-20260204060029-8d16215e109b
+	github.com/jarrod-lowe/jmap-service-libs v0.0.0-20260204070741-a75cf01109e0
 	github.com/qri-io/jsonpointer v0.1.1
 	go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws v0.65.0
 	go.opentelemetry.io/otel v1.40.0

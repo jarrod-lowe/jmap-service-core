@@ -19,6 +19,7 @@ import (
 	"github.com/jarrod-lowe/jmap-service-core/internal/plugin"
 	"github.com/jarrod-lowe/jmap-service-core/internal/resultref"
 	"github.com/jarrod-lowe/jmap-service-libs/awsinit"
+	"github.com/jarrod-lowe/jmap-service-libs/jmaperror"
 	"github.com/jarrod-lowe/jmap-service-libs/logging"
 	"github.com/jarrod-lowe/jmap-service-libs/tracing"
 )
@@ -106,20 +107,22 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 			slog.String("request_id", request.RequestContext.RequestID),
 			slog.String("error", err.Error()),
 		)
+		problemJSON, _ := json.Marshal(jmaperror.NotJSON("Invalid JSON in request body").ToMap())
 		return Response{
 			StatusCode: 400,
-			Headers:    map[string]string{"Content-Type": "application/json"},
-			Body:       `{"type":"urn:ietf:params:jmap:error:notJSON","status":400,"detail":"Invalid JSON in request body"}`,
+			Headers:    map[string]string{"Content-Type": "application/problem+json"},
+			Body:       string(problemJSON),
 		}, nil
 	}
 
 	// Validate capabilities
 	for _, cap := range jmapReq.Using {
 		if !deps.Registry.HasCapability(cap) {
+			problemJSON, _ := json.Marshal(jmaperror.UnknownCapability("Unknown capability: " + cap).ToMap())
 			return Response{
 				StatusCode: 400,
-				Headers:    map[string]string{"Content-Type": "application/json"},
-				Body:       fmt.Sprintf(`{"type":"urn:ietf:params:jmap:error:unknownCapability","status":400,"detail":"Unknown capability: %s"}`, cap),
+				Headers:    map[string]string{"Content-Type": "application/problem+json"},
+				Body:       string(problemJSON),
 			}, nil
 		}
 	}
@@ -228,25 +231,16 @@ func processMethodCall(ctx context.Context, accountID string, call []any, index 
 
 	// Validate call structure: [methodName, args, clientId]
 	if len(call) != 3 {
-		return []any{"error", map[string]any{
-			"type":        "invalidArguments",
-			"description": "Method call must have exactly 3 elements: [name, args, clientId]",
-		}, ""}
+		return []any{"error", jmaperror.InvalidArguments("Method call must have exactly 3 elements: [name, args, clientId]").ToMap(), ""}
 	}
 
 	if methodName == "" {
-		return []any{"error", map[string]any{
-			"type":        "invalidArguments",
-			"description": "Method name must be a string",
-		}, ""}
+		return []any{"error", jmaperror.InvalidArguments("Method name must be a string").ToMap(), ""}
 	}
 
 	args, ok := call[1].(map[string]any)
 	if !ok {
-		return []any{"error", map[string]any{
-			"type":        "invalidArguments",
-			"description": "Method arguments must be an object",
-		}, methodName}
+		return []any{"error", jmaperror.InvalidArguments("Method arguments must be an object").ToMap(), methodName}
 	}
 
 	// Resolve result references (RFC 8620 Section 3.7)
@@ -255,15 +249,13 @@ func processMethodCall(ctx context.Context, accountID string, call []any, index 
 		tracing.RecordError(span, err)
 		resolveErr, ok := err.(*resultref.ResolveError)
 		if ok {
-			return []any{"error", map[string]any{
-				"type":        string(resolveErr.Type),
-				"description": resolveErr.Description,
-			}, clientID}
+			jmapErr := &jmaperror.MethodError{
+				ErrType:     string(resolveErr.Type),
+				Description: resolveErr.Description,
+			}
+			return []any{"error", jmapErr.ToMap(), clientID}
 		}
-		return []any{"error", map[string]any{
-			"type":        "serverFail",
-			"description": "Failed to resolve result references",
-		}, clientID}
+		return []any{"error", jmaperror.ServerFail("Failed to resolve result references", err).ToMap(), clientID}
 	}
 
 	// Handle built-in methods before plugin dispatch
@@ -274,18 +266,13 @@ func processMethodCall(ctx context.Context, accountID string, call []any, index 
 	// Look up method target
 	target := deps.Registry.GetMethodTarget(methodName)
 	if target == nil {
-		return []any{"error", map[string]any{
-			"type": "unknownMethod",
-		}, clientID}
+		return []any{"error", jmaperror.UnknownMethod("").ToMap(), clientID}
 	}
 
 	// Validate accountId in args matches authenticated accountId
 	if argsAccountID, ok := resolvedArgs["accountId"].(string); ok {
 		if argsAccountID != accountID {
-			return []any{"error", map[string]any{
-				"type":        "accountNotFound",
-				"description": "Account ID mismatch",
-			}, clientID}
+			return []any{"error", jmaperror.AccountNotFound("Account ID mismatch").ToMap(), clientID}
 		}
 	}
 
@@ -307,10 +294,7 @@ func processMethodCall(ctx context.Context, accountID string, call []any, index 
 			slog.String("method", methodName),
 			slog.String("error", err.Error()),
 		)
-		return []any{"error", map[string]any{
-			"type":        "serverFail",
-			"description": "Plugin invocation failed",
-		}, clientID}
+		return []any{"error", jmaperror.ServerFail("Plugin invocation failed", err).ToMap(), clientID}
 	}
 
 	// Return plugin response as JMAP method response
@@ -325,9 +309,7 @@ func processMethodCall(ctx context.Context, accountID string, call []any, index 
 func handleBlobAllocate(ctx context.Context, accountID string, args map[string]any, clientID string, usingCaps []string) []any {
 	// Check if Blob/allocate is enabled
 	if deps.BlobAllocator == nil {
-		return []any{"error", map[string]any{
-			"type": "unknownMethod",
-		}, clientID}
+		return []any{"error", jmaperror.UnknownMethod("").ToMap(), clientID}
 	}
 
 	// Check that the capability is in the using array
@@ -339,28 +321,19 @@ func handleBlobAllocate(ctx context.Context, accountID string, args map[string]a
 		}
 	}
 	if !hasCapability {
-		return []any{"error", map[string]any{
-			"type":        "unknownMethod",
-			"description": "Blob/allocate requires the " + UploadPutCapability + " capability",
-		}, clientID}
+		return []any{"error", jmaperror.UnknownMethod("Blob/allocate requires the " + UploadPutCapability + " capability").ToMap(), clientID}
 	}
 
 	// Validate accountId in args
 	argsAccountID, _ := args["accountId"].(string)
 	if argsAccountID != "" && argsAccountID != accountID {
-		return []any{"error", map[string]any{
-			"type":        "accountNotFound",
-			"description": "Account ID mismatch",
-		}, clientID}
+		return []any{"error", jmaperror.AccountNotFound("Account ID mismatch").ToMap(), clientID}
 	}
 
 	// Extract the create map (per RFC 9404 pattern)
 	createMap, ok := args["create"].(map[string]any)
 	if !ok || len(createMap) == 0 {
-		return []any{"error", map[string]any{
-			"type":        "invalidArguments",
-			"description": "create map is required",
-		}, clientID}
+		return []any{"error", jmaperror.InvalidArguments("create map is required").ToMap(), clientID}
 	}
 
 	created := make(map[string]any)
@@ -370,10 +343,7 @@ func handleBlobAllocate(ctx context.Context, accountID string, args map[string]a
 	for creationID, reqData := range createMap {
 		reqMap, ok := reqData.(map[string]any)
 		if !ok {
-			notCreated[creationID] = map[string]any{
-				"type":        "invalidArguments",
-				"description": "invalid request format",
-			}
+			notCreated[creationID] = jmaperror.InvalidArguments("invalid request format").ToMap()
 			continue
 		}
 
@@ -390,19 +360,14 @@ func handleBlobAllocate(ctx context.Context, accountID string, args map[string]a
 		if err != nil {
 			allocErr, ok := err.(*bloballocate.AllocationError)
 			if ok {
-				errInfo := map[string]any{
-					"type":        allocErr.Type,
-					"description": allocErr.Message,
+				setErr := &jmaperror.SetError{
+					ErrType:     allocErr.Type,
+					Description: allocErr.Message,
+					Properties:  allocErr.Properties,
 				}
-				if len(allocErr.Properties) > 0 {
-					errInfo["properties"] = allocErr.Properties
-				}
-				notCreated[creationID] = errInfo
+				notCreated[creationID] = setErr.ToMap()
 			} else {
-				notCreated[creationID] = map[string]any{
-					"type":        "serverFail",
-					"description": "Failed to allocate blob",
-				}
+				notCreated[creationID] = jmaperror.SetServerFail("Failed to allocate blob").ToMap()
 			}
 			continue
 		}

@@ -105,8 +105,8 @@ func TestHandler_InvalidJSON_Returns400(t *testing.T) {
 		t.Errorf("expected status code 400, got %d", response.StatusCode)
 	}
 
-	if response.Headers["Content-Type"] != "application/json" {
-		t.Errorf("expected Content-Type application/json")
+	if response.Headers["Content-Type"] != "application/problem+json" {
+		t.Errorf("expected Content-Type application/problem+json, got %s", response.Headers["Content-Type"])
 	}
 }
 
