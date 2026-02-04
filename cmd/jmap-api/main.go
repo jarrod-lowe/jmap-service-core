@@ -9,8 +9,6 @@ import (
 	"strconv"
 
 	"github.com/aws/aws-lambda-go/events"
-	"github.com/aws/aws-lambda-go/lambda"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	lambdasvc "github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -20,12 +18,9 @@ import (
 	"github.com/jarrod-lowe/jmap-service-core/internal/dispatcher"
 	"github.com/jarrod-lowe/jmap-service-core/internal/plugin"
 	"github.com/jarrod-lowe/jmap-service-core/internal/resultref"
+	"github.com/jarrod-lowe/jmap-service-libs/awsinit"
 	"github.com/jarrod-lowe/jmap-service-libs/logging"
 	"github.com/jarrod-lowe/jmap-service-libs/tracing"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda/xrayconfig"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
-	"go.opentelemetry.io/otel"
 )
 
 var logger = logging.New()
@@ -461,18 +456,14 @@ func (r *RealUUIDGenerator) Generate() string {
 func main() {
 	ctx := context.Background()
 
-	tp, err := tracing.Init(ctx)
+	result, err := awsinit.Init(ctx, awsinit.WithHTTPHandler("jmap-api"))
 	if err != nil {
-		logger.Error("FATAL: Failed to initialize tracer provider",
+		logger.Error("FATAL: Failed to initialize AWS",
 			slog.String("error", err.Error()),
 		)
 		panic(err)
 	}
-	otel.SetTracerProvider(tp)
-
-	// Create cold start span - all init AWS calls become children
-	ctx, coldStartSpan := tracing.StartColdStartSpan(ctx, "jmap-api")
-	defer coldStartSpan.End()
+	defer result.Cleanup()
 
 	// Initialize DynamoDB client
 	tableName := os.Getenv("DYNAMODB_TABLE")
@@ -480,17 +471,11 @@ func main() {
 		logger.Error("FATAL: DYNAMODB_TABLE environment variable is required")
 		panic("DYNAMODB_TABLE environment variable is required")
 	}
-	dbClient, err := db.NewClient(ctx, tableName)
-	if err != nil {
-		logger.Error("FATAL: Failed to initialize DynamoDB client",
-			slog.String("error", err.Error()),
-		)
-		panic(err)
-	}
+	dbClient := db.NewClientFromConfig(result.Config, tableName)
 
 	// Load plugin registry
 	registry := plugin.NewRegistry()
-	if err := registry.LoadFromDynamoDB(ctx, dbClient); err != nil {
+	if err := registry.LoadFromDynamoDB(result.Ctx, dbClient); err != nil {
 		logger.Error("FATAL: Failed to load plugin registry",
 			slog.String("error", err.Error()),
 		)
@@ -498,15 +483,7 @@ func main() {
 	}
 
 	// Initialize Lambda invoker
-	lambdaCfg, err := awsconfig.LoadDefaultConfig(ctx)
-	if err != nil {
-		logger.Error("FATAL: Failed to load AWS config for Lambda",
-			slog.String("error", err.Error()),
-		)
-		panic(err)
-	}
-	otelaws.AppendMiddlewares(&lambdaCfg.APIOptions)
-	lambdaClient := lambdasvc.NewFromConfig(lambdaCfg)
+	lambdaClient := lambdasvc.NewFromConfig(result.Config)
 	invoker := plugin.NewLambdaInvoker(lambdaClient)
 
 	// Initialize Blob/allocate handler
@@ -528,11 +505,11 @@ func main() {
 		}
 
 		// Initialize S3 presign client
-		s3Client := s3.NewFromConfig(lambdaCfg)
+		s3Client := s3.NewFromConfig(result.Config)
 		presignClient := s3.NewPresignClient(s3Client)
 
 		// Initialize DynamoDB client for blob allocations
-		ddbClient := dynamodb.NewFromConfig(lambdaCfg)
+		ddbClient := dynamodb.NewFromConfig(result.Config)
 
 		blobAllocator = &bloballocate.Handler{
 			Storage:          bloballocate.NewS3Storage(presignClient, blobBucket),
@@ -559,5 +536,5 @@ func main() {
 		DispatcherPoolSize: dispatcherPoolSize,
 	}
 
-	lambda.Start(otellambda.InstrumentHandler(handler, xrayconfig.WithRecommendedOptions(tp)...))
+	result.Start(handler)
 }

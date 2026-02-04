@@ -7,18 +7,12 @@ import (
 	"os"
 	"time"
 
-	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	"github.com/jarrod-lowe/jmap-service-libs/awsinit"
 	"github.com/jarrod-lowe/jmap-service-libs/logging"
-	"github.com/jarrod-lowe/jmap-service-libs/tracing"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda/xrayconfig"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
-	"go.opentelemetry.io/otel"
 )
 
 var logger = logging.New()
@@ -146,19 +140,14 @@ func (p *CloudWatchMetricsPublisher) PublishMetric(ctx context.Context, name str
 func main() {
 	ctx := context.Background()
 
-	// Initialize tracer provider
-	tp, err := tracing.Init(ctx)
+	result, err := awsinit.Init(ctx)
 	if err != nil {
-		logger.Error("FATAL: Failed to initialize tracer provider",
+		logger.Error("FATAL: Failed to initialize AWS",
 			slog.String("error", err.Error()),
 		)
 		panic(err)
 	}
-	otel.SetTracerProvider(tp)
-
-	// Create cold start span - all init AWS calls become children
-	ctx, coldStartSpan := tracing.StartColdStartSpan(ctx, "key-age-check")
-	defer coldStartSpan.End()
+	defer result.Cleanup()
 
 	// Get required environment variables
 	ssmParameterName := os.Getenv("SSM_PARAMETER_NAME")
@@ -173,18 +162,8 @@ func main() {
 		panic("METRIC_NAMESPACE environment variable is required")
 	}
 
-	// Initialize AWS clients
-	cfg, err := awsconfig.LoadDefaultConfig(ctx)
-	if err != nil {
-		logger.Error("FATAL: Failed to load AWS config",
-			slog.String("error", err.Error()),
-		)
-		panic(err)
-	}
-	otelaws.AppendMiddlewares(&cfg.APIOptions)
-
-	ssmClient := ssm.NewFromConfig(cfg)
-	cwClient := cloudwatch.NewFromConfig(cfg)
+	ssmClient := ssm.NewFromConfig(result.Config)
+	cwClient := cloudwatch.NewFromConfig(result.Config)
 
 	deps = &Dependencies{
 		SSMReader:        NewSSMParameterReader(ssmClient),
@@ -195,5 +174,5 @@ func main() {
 		},
 	}
 
-	lambda.Start(otellambda.InstrumentHandler(handler, xrayconfig.WithRecommendedOptions(tp)...))
+	result.Start(handler)
 }

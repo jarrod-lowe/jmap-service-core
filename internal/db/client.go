@@ -33,7 +33,8 @@ type Client struct {
 	tableName string
 }
 
-// NewClient creates a new DynamoDB client with OTel instrumentation
+// NewClient creates a new DynamoDB client with OTel instrumentation.
+// Deprecated: prefer NewClientFromConfig to avoid redundant AWS config loading.
 func NewClient(ctx context.Context, tableName string) (*Client, error) {
 	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
@@ -49,6 +50,16 @@ func NewClient(ctx context.Context, tableName string) (*Client, error) {
 		ddb:       ddb,
 		tableName: tableName,
 	}, nil
+}
+
+// NewClientFromConfig creates a new DynamoDB client from an existing AWS config.
+// The config should already have OTel middleware appended.
+func NewClientFromConfig(cfg aws.Config, tableName string) *Client {
+	ddb := dynamodb.NewFromConfig(cfg)
+	return &Client{
+		ddb:       ddb,
+		tableName: tableName,
+	}
 }
 
 // Account represents an account record in DynamoDB

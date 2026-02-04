@@ -7,18 +7,12 @@ import (
 	"os"
 
 	"github.com/aws/aws-lambda-go/events"
-	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/jarrod-lowe/jmap-service-libs/awsinit"
 	"github.com/jarrod-lowe/jmap-service-libs/logging"
-	"github.com/jarrod-lowe/jmap-service-libs/tracing"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda/xrayconfig"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
-	"go.opentelemetry.io/otel"
 )
 
 var logger = logging.New()
@@ -240,19 +234,14 @@ func (d *DynamoDBBlobDeleter) DeleteBlobRecord(ctx context.Context, pk, sk strin
 func main() {
 	ctx := context.Background()
 
-	// Initialize tracer provider
-	tp, err := tracing.Init(ctx)
+	result, err := awsinit.Init(ctx)
 	if err != nil {
-		logger.Error("FATAL: Failed to initialize tracer provider",
+		logger.Error("FATAL: Failed to initialize AWS",
 			slog.String("error", err.Error()),
 		)
 		panic(err)
 	}
-	otel.SetTracerProvider(tp)
-
-	// Create cold start span - all init AWS calls become children
-	ctx, coldStartSpan := tracing.StartColdStartSpan(ctx, "blob-cleanup")
-	defer coldStartSpan.End()
+	defer result.Cleanup()
 
 	tableName := os.Getenv("DYNAMODB_TABLE")
 	if tableName == "" {
@@ -266,17 +255,8 @@ func main() {
 		panic("BLOB_BUCKET environment variable is required")
 	}
 
-	cfg, err := awsconfig.LoadDefaultConfig(ctx)
-	if err != nil {
-		logger.Error("FATAL: Failed to load AWS config",
-			slog.String("error", err.Error()),
-		)
-		panic(err)
-	}
-	otelaws.AppendMiddlewares(&cfg.APIOptions)
-
-	dynamoClient := dynamodb.NewFromConfig(cfg)
-	s3Client := s3.NewFromConfig(cfg)
+	dynamoClient := dynamodb.NewFromConfig(result.Config)
+	s3Client := s3.NewFromConfig(result.Config)
 
 	deps = &Dependencies{
 		S3Deleter:  NewS3BlobDeleter(s3Client),
@@ -284,5 +264,5 @@ func main() {
 		BlobBucket: blobBucket,
 	}
 
-	lambda.Start(otellambda.InstrumentHandler(handler, xrayconfig.WithRecommendedOptions(tp)...))
+	result.Start(handler)
 }

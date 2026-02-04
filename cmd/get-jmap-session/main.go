@@ -8,14 +8,11 @@ import (
 	"os"
 
 	"github.com/aws/aws-lambda-go/events"
-	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/jarrod-lowe/jmap-service-core/internal/db"
 	"github.com/jarrod-lowe/jmap-service-core/internal/plugin"
+	"github.com/jarrod-lowe/jmap-service-libs/awsinit"
 	"github.com/jarrod-lowe/jmap-service-libs/logging"
 	"github.com/jarrod-lowe/jmap-service-libs/tracing"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda/xrayconfig"
-	"go.opentelemetry.io/otel"
 )
 
 var logger = logging.New()
@@ -211,18 +208,14 @@ func buildSession(userID string, cfg Config, registry *plugin.Registry) JMAPSess
 func main() {
 	ctx := context.Background()
 
-	tp, err := tracing.Init(ctx)
+	result, err := awsinit.Init(ctx, awsinit.WithHTTPHandler("get-jmap-session"))
 	if err != nil {
-		logger.Error("FATAL: Failed to initialize tracer provider",
+		logger.Error("FATAL: Failed to initialize AWS",
 			slog.String("error", err.Error()),
 		)
 		panic(err)
 	}
-	otel.SetTracerProvider(tp)
-
-	// Create cold start span - all init AWS calls become children
-	ctx, coldStartSpan := tracing.StartColdStartSpan(ctx, "get-jmap-session")
-	defer coldStartSpan.End()
+	defer result.Cleanup()
 
 	// Initialize DynamoDB client with OTel instrumentation
 	tableName := os.Getenv("DYNAMODB_TABLE")
@@ -230,23 +223,17 @@ func main() {
 		logger.Error("FATAL: DYNAMODB_TABLE environment variable is required")
 		panic("DYNAMODB_TABLE environment variable is required")
 	}
-	dbClient, err := db.NewClient(ctx, tableName)
-	if err != nil {
-		logger.Error("FATAL: Failed to initialize DynamoDB client",
-			slog.String("error", err.Error()),
-		)
-		panic(err)
-	}
+	dbClient := db.NewClientFromConfig(result.Config, tableName)
 	accountStore = dbClient
 
 	// Load plugin registry
 	pluginRegistry = plugin.NewRegistry()
-	if err := pluginRegistry.LoadFromDynamoDB(ctx, dbClient); err != nil {
+	if err := pluginRegistry.LoadFromDynamoDB(result.Ctx, dbClient); err != nil {
 		logger.Error("FATAL: Failed to load plugin registry",
 			slog.String("error", err.Error()),
 		)
 		panic(err)
 	}
 
-	lambda.Start(otellambda.InstrumentHandler(handler, xrayconfig.WithRecommendedOptions(tp)...))
+	result.Start(handler)
 }

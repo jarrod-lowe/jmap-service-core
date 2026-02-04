@@ -14,9 +14,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
-	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/feature/cloudfront/sign"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -24,12 +22,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/jarrod-lowe/jmap-service-core/internal/db"
 	"github.com/jarrod-lowe/jmap-service-core/internal/plugin"
+	"github.com/jarrod-lowe/jmap-service-libs/awsinit"
 	"github.com/jarrod-lowe/jmap-service-libs/logging"
 	"github.com/jarrod-lowe/jmap-service-libs/tracing"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda/xrayconfig"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
-	"go.opentelemetry.io/otel"
 )
 
 var logger = logging.New()
@@ -459,19 +454,14 @@ func (s *SecretsManagerReader) GetPrivateKey(ctx context.Context, secretARN stri
 func main() {
 	ctx := context.Background()
 
-	// Initialize tracer provider
-	tp, err := tracing.Init(ctx)
+	result, err := awsinit.Init(ctx, awsinit.WithHTTPHandler("blob-download"))
 	if err != nil {
-		logger.Error("FATAL: Failed to initialize tracer provider",
+		logger.Error("FATAL: Failed to initialize AWS",
 			slog.String("error", err.Error()),
 		)
 		panic(err)
 	}
-	otel.SetTracerProvider(tp)
-
-	// Create cold start span - all init AWS calls become children
-	ctx, coldStartSpan := tracing.StartColdStartSpan(ctx, "blob-download")
-	defer coldStartSpan.End()
+	defer result.Cleanup()
 
 	// Get required environment variables
 	tableName := os.Getenv("DYNAMODB_TABLE")
@@ -505,22 +495,12 @@ func main() {
 		}
 	}
 
-	// Initialize AWS clients
-	cfg, err := awsconfig.LoadDefaultConfig(ctx)
-	if err != nil {
-		logger.Error("FATAL: Failed to load AWS config",
-			slog.String("error", err.Error()),
-		)
-		panic(err)
-	}
-	otelaws.AppendMiddlewares(&cfg.APIOptions)
-
-	dynamoClient := dynamodb.NewFromConfig(cfg)
-	secretsClient := secretsmanager.NewFromConfig(cfg)
+	dynamoClient := dynamodb.NewFromConfig(result.Config)
+	secretsClient := secretsmanager.NewFromConfig(result.Config)
 
 	// Read private key from Secrets Manager
 	secretsReader := NewSecretsManagerReader(secretsClient)
-	privateKey, err := secretsReader.GetPrivateKey(ctx, privateKeySecretARN)
+	privateKey, err := secretsReader.GetPrivateKey(result.Ctx, privateKeySecretARN)
 	if err != nil {
 		logger.Error("FATAL: Failed to read private key from Secrets Manager",
 			slog.String("error", err.Error()),
@@ -538,17 +518,11 @@ func main() {
 	}
 
 	// Initialize database client for plugin registry
-	dbClient, err := db.NewClient(ctx, tableName)
-	if err != nil {
-		logger.Error("FATAL: Failed to initialize DynamoDB client for plugin registry",
-			slog.String("error", err.Error()),
-		)
-		panic(err)
-	}
+	dbClient := db.NewClientFromConfig(result.Config, tableName)
 
 	// Load plugin registry for IAM principal authorization
 	registry := plugin.NewRegistry()
-	if err := registry.LoadFromDynamoDB(ctx, dbClient); err != nil {
+	if err := registry.LoadFromDynamoDB(result.Ctx, dbClient); err != nil {
 		logger.Error("FATAL: Failed to load plugin registry",
 			slog.String("error", err.Error()),
 		)
@@ -568,5 +542,5 @@ func main() {
 		},
 	}
 
-	lambda.Start(otellambda.InstrumentHandler(handler, xrayconfig.WithRecommendedOptions(tp)...))
+	result.Start(handler)
 }

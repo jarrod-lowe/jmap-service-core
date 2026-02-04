@@ -10,19 +10,14 @@ import (
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
-	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/jarrod-lowe/jmap-service-libs/awsinit"
 	"github.com/jarrod-lowe/jmap-service-libs/logging"
 	"github.com/jarrod-lowe/jmap-service-libs/tracing"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda/xrayconfig"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 )
 
@@ -311,19 +306,14 @@ func (d *DynamoDBConfirmStore) ConfirmBlob(ctx context.Context, accountID, blobI
 func main() {
 	ctx := context.Background()
 
-	// Initialize tracer provider
-	tp, err := tracing.Init(ctx)
+	result, err := awsinit.Init(ctx)
 	if err != nil {
-		logger.Error("FATAL: Failed to initialize tracer provider",
+		logger.Error("FATAL: Failed to initialize AWS",
 			slog.String("error", err.Error()),
 		)
 		panic(err)
 	}
-	otel.SetTracerProvider(tp)
-
-	// Create cold start span - all init AWS calls become children
-	ctx, coldStartSpan := tracing.StartColdStartSpan(ctx, "blob-confirm")
-	defer coldStartSpan.End()
+	defer result.Cleanup()
 
 	// Get required environment variables
 	tableName := os.Getenv("DYNAMODB_TABLE")
@@ -338,23 +328,13 @@ func main() {
 		panic("BLOB_BUCKET environment variable is required")
 	}
 
-	// Initialize AWS clients
-	cfg, err := awsconfig.LoadDefaultConfig(ctx)
-	if err != nil {
-		logger.Error("FATAL: Failed to load AWS config",
-			slog.String("error", err.Error()),
-		)
-		panic(err)
-	}
-	otelaws.AppendMiddlewares(&cfg.APIOptions)
-
-	s3Client := s3.NewFromConfig(cfg)
-	dynamoClient := dynamodb.NewFromConfig(cfg)
+	s3Client := s3.NewFromConfig(result.Config)
+	dynamoClient := dynamodb.NewFromConfig(result.Config)
 
 	deps = &Dependencies{
 		Storage: NewS3ConfirmStorage(s3Client, bucketName),
 		DB:      NewDynamoDBConfirmStore(dynamoClient, tableName),
 	}
 
-	lambda.Start(otellambda.InstrumentHandler(handler, xrayconfig.WithRecommendedOptions(tp)...))
+	result.Start(handler)
 }
