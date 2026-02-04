@@ -53,6 +53,8 @@ resource "aws_api_gateway_stage" "v1" {
   rest_api_id   = aws_api_gateway_rest_api.api.id
   stage_name    = "v1"
 
+  xray_tracing_enabled = true
+
   access_log_settings {
     destination_arn = aws_cloudwatch_log_group.api_gateway_logs.arn
     format = jsonencode({
