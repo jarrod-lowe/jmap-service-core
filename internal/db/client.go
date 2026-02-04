@@ -6,56 +6,23 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/expression"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
+	"github.com/jarrod-lowe/jmap-service-libs/dbclient"
 )
-
-// Key prefixes for single-table design
-const (
-	PKPrefixAccount = "ACCOUNT#"
-	PKPrefixUser    = "USER#"
-	SKMeta          = "META#"
-)
-
-// DynamoDBClient defines the interface for DynamoDB operations
-type DynamoDBClient interface {
-	UpdateItem(ctx context.Context, params *dynamodb.UpdateItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
-	Query(ctx context.Context, params *dynamodb.QueryInput, optFns ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error)
-}
 
 // Client wraps DynamoDB operations with OTel tracing
 type Client struct {
-	ddb       DynamoDBClient
+	ddb       dbclient.DynamoDBClient
 	tableName string
-}
-
-// NewClient creates a new DynamoDB client with OTel instrumentation.
-// Deprecated: prefer NewClientFromConfig to avoid redundant AWS config loading.
-func NewClient(ctx context.Context, tableName string) (*Client, error) {
-	cfg, err := config.LoadDefaultConfig(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load AWS config: %w", err)
-	}
-
-	// Add OTel instrumentation for X-Ray tracing
-	otelaws.AppendMiddlewares(&cfg.APIOptions)
-
-	ddb := dynamodb.NewFromConfig(cfg)
-
-	return &Client{
-		ddb:       ddb,
-		tableName: tableName,
-	}, nil
 }
 
 // NewClientFromConfig creates a new DynamoDB client from an existing AWS config.
 // The config should already have OTel middleware appended.
 func NewClientFromConfig(cfg aws.Config, tableName string) *Client {
-	ddb := dynamodb.NewFromConfig(cfg)
+	ddb := dbclient.NewClient(cfg)
 	return &Client{
 		ddb:       ddb,
 		tableName: tableName,
@@ -77,13 +44,13 @@ type Account struct {
 // and always updates lastDiscoveryAccess.
 func (c *Client) EnsureAccount(ctx context.Context, userID string) (*Account, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	pk := PKPrefixAccount + userID
-	owner := PKPrefixUser + userID
+	pk := dbclient.AccountPK(userID)
+	owner := dbclient.UserPK(userID)
 
 	// Build key using attributevalue
 	key, err := attributevalue.MarshalMap(map[string]string{
 		"pk": pk,
-		"sk": SKMeta,
+		"sk": dbclient.SKMeta,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal key: %w", err)
