@@ -223,7 +223,10 @@ def test_account(jmap_host, cognito_user_pool_id, cognito_client_id,
 
         # Trigger META# creation via discovery request
         session_url = f"https://{jmap_host}/.well-known/jmap"
-        resp = requests.get(session_url, headers={"Authorization": f"Bearer {token}"}, timeout=30)
+        resp = requests.get(session_url, headers={
+            "Authorization": f"Bearer {token}",
+            "X-JMAP-Stage": "e2e",
+        }, timeout=30)
         resp.raise_for_status()
         session_data = resp.json()
 
@@ -328,13 +331,21 @@ def account_id(test_account):
     return test_account.account_id
 
 
+E2E_STAGE_HEADER = {"X-JMAP-Stage": "e2e"}
+
+
 @pytest.fixture(scope="session")
 def jmap_client(jmap_host, token):
-    """Create a jmapc Client connected to the JMAP server."""
+    """Create a jmapc Client connected to the JMAP server.
+
+    Injects X-JMAP-Stage header to route traffic through the e2e API Gateway
+    stage, keeping test traffic separate from production alarms.
+    """
     client = jmapc.Client.create_with_api_token(
         host=jmap_host,
         api_token=token,
     )
+    client.requests_session.headers.update(E2E_STAGE_HEADER)
     return client
 
 

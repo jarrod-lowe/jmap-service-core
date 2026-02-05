@@ -74,9 +74,42 @@ resource "aws_api_gateway_stage" "v1" {
   depends_on = [aws_api_gateway_account.api]
 }
 
+# E2E test stage - separate from v1 to isolate test traffic from production alarms
+resource "aws_api_gateway_stage" "e2e" {
+  deployment_id = aws_api_gateway_deployment.api.id
+  rest_api_id   = aws_api_gateway_rest_api.api.id
+  stage_name    = "e2e"
+
+  xray_tracing_enabled = true
+
+  access_log_settings {
+    destination_arn = aws_cloudwatch_log_group.api_gateway_e2e_logs.arn
+    format = jsonencode({
+      requestId      = "$context.requestId"
+      ip             = "$context.identity.sourceIp"
+      caller         = "$context.identity.caller"
+      user           = "$context.identity.user"
+      requestTime    = "$context.requestTime"
+      httpMethod     = "$context.httpMethod"
+      resourcePath   = "$context.resourcePath"
+      status         = "$context.status"
+      protocol       = "$context.protocol"
+      responseLength = "$context.responseLength"
+    })
+  }
+
+  depends_on = [aws_api_gateway_account.api]
+}
+
 # CloudWatch log group for API Gateway access logs
 resource "aws_cloudwatch_log_group" "api_gateway_logs" {
   name              = "/aws/apigateway/jmap-service-${var.environment}"
+  retention_in_days = var.log_retention_days
+}
+
+# CloudWatch log group for e2e stage access logs
+resource "aws_cloudwatch_log_group" "api_gateway_e2e_logs" {
+  name              = "/aws/apigateway/jmap-service-${var.environment}-e2e"
   retention_in_days = var.log_retention_days
 }
 

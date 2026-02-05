@@ -127,11 +127,21 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 		}
 	}
 
+	// Compute service URLs from env vars + request stage
+	stage := request.RequestContext.Stage
+	if stage == "" {
+		stage = "v1"
+	}
+	cdnURL := fmt.Sprintf("https://%s/%s", os.Getenv("API_DOMAIN"), stage)
+	apiURL := fmt.Sprintf("https://%s.execute-api.%s.amazonaws.com/%s", request.RequestContext.APIID, os.Getenv("AWS_REGION"), stage)
+
 	// Process method calls in parallel with dependency tracking
 	processor := &JMAPCallProcessor{
 		AccountID: accountID,
 		RequestID: request.RequestContext.RequestID,
 		UsingCaps: jmapReq.Using,
+		CDNURL:    cdnURL,
+		APIURL:    apiURL,
 	}
 
 	cfg := dispatcher.Config{
@@ -207,15 +217,17 @@ type JMAPCallProcessor struct {
 	AccountID string
 	RequestID string
 	UsingCaps []string
+	CDNURL    string
+	APIURL    string
 }
 
 // Process implements dispatcher.CallProcessor
 func (p *JMAPCallProcessor) Process(ctx context.Context, idx int, call []any, depResponses []resultref.MethodResponse) []any {
-	return processMethodCall(ctx, p.AccountID, call, idx, p.RequestID, depResponses, p.UsingCaps)
+	return processMethodCall(ctx, p.AccountID, call, idx, p.RequestID, depResponses, p.UsingCaps, p.CDNURL, p.APIURL)
 }
 
 // processMethodCall dispatches a method call to the appropriate plugin
-func processMethodCall(ctx context.Context, accountID string, call []any, index int, requestID string, previousResponses []resultref.MethodResponse, usingCaps []string) []any {
+func processMethodCall(ctx context.Context, accountID string, call []any, index int, requestID string, previousResponses []resultref.MethodResponse, usingCaps []string, cdnURL string, apiURL string) []any {
 	// Extract method name and clientID early for span attributes
 	var methodName, clientID string
 	if len(call) >= 1 {
@@ -284,6 +296,8 @@ func processMethodCall(ctx context.Context, accountID string, call []any, index 
 		Method:    methodName,
 		Args:      resolvedArgs,
 		ClientID:  clientID,
+		CDNURL:    cdnURL,
+		APIURL:    apiURL,
 	}
 
 	// Invoke plugin

@@ -115,7 +115,12 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 		}, nil
 	}
 
-	session := buildSession(userID, config, pluginRegistry)
+	stage := request.RequestContext.Stage
+	if stage == "" {
+		stage = "v1"
+	}
+
+	session := buildSession(userID, config, pluginRegistry, stage)
 
 	bodyJSON, err := json.Marshal(session)
 	if err != nil {
@@ -160,8 +165,11 @@ func extractSubClaim(request events.APIGatewayProxyRequest) (string, error) {
 	return sub, nil
 }
 
-func buildSession(userID string, cfg Config, registry *plugin.Registry) JMAPSession {
-	baseURL := fmt.Sprintf("https://%s/v1", cfg.APIDomain)
+func buildSession(userID string, cfg Config, registry *plugin.Registry, stage string) JMAPSession {
+	if stage == "" {
+		stage = "v1"
+	}
+	baseURL := fmt.Sprintf("https://%s/%s", cfg.APIDomain, stage)
 
 	// Build capabilities, accounts, and primaryAccounts from registry
 	capabilities := make(map[string]any)

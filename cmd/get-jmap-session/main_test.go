@@ -330,7 +330,7 @@ func TestHandler_CoreCapabilityValues(t *testing.T) {
 // This test uses direct Config injection - no environment variables needed
 func TestBuildSession_WithInjectedConfig(t *testing.T) {
 	cfg := Config{APIDomain: "test.example.com"}
-	session := buildSession("user-123", cfg, nil)
+	session := buildSession("user-123", cfg, nil, "v1")
 
 	// Verify URLs use the injected domain
 	expectedAPIUrl := "https://test.example.com/v1/jmap"
@@ -360,6 +360,36 @@ func TestBuildSession_WithInjectedConfig(t *testing.T) {
 
 	if _, exists := session.Accounts["user-123"]; !exists {
 		t.Error("expected account with ID 'user-123' to exist")
+	}
+}
+
+func TestBuildSession_E2EStage(t *testing.T) {
+	cfg := Config{APIDomain: "test.example.com"}
+	session := buildSession("user-123", cfg, nil, "e2e")
+
+	expectedAPIUrl := "https://test.example.com/e2e/jmap"
+	if session.APIUrl != expectedAPIUrl {
+		t.Errorf("expected apiUrl '%s', got '%s'", expectedAPIUrl, session.APIUrl)
+	}
+
+	expectedDownloadUrl := "https://test.example.com/e2e/download/{accountId}/{blobId}"
+	if session.DownloadUrl != expectedDownloadUrl {
+		t.Errorf("expected downloadUrl '%s', got '%s'", expectedDownloadUrl, session.DownloadUrl)
+	}
+
+	expectedUploadUrl := "https://test.example.com/e2e/upload/{accountId}"
+	if session.UploadUrl != expectedUploadUrl {
+		t.Errorf("expected uploadUrl '%s', got '%s'", expectedUploadUrl, session.UploadUrl)
+	}
+}
+
+func TestBuildSession_EmptyStageDefaultsToV1(t *testing.T) {
+	cfg := Config{APIDomain: "test.example.com"}
+	session := buildSession("user-123", cfg, nil, "")
+
+	expectedAPIUrl := "https://test.example.com/v1/jmap"
+	if session.APIUrl != expectedAPIUrl {
+		t.Errorf("expected apiUrl '%s', got '%s'", expectedAPIUrl, session.APIUrl)
 	}
 }
 

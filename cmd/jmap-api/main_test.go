@@ -258,7 +258,7 @@ func TestProcessMethodCall_InvalidCallStructure_ReturnsError(t *testing.T) {
 
 	// Call with wrong number of elements
 	call := []any{"method", "not-an-object"}
-	result := processMethodCall(ctx, "user-123", call, 0, "req-123", nil, nil)
+	result := processMethodCall(ctx, "user-123", call, 0, "req-123", nil, nil, "", "")
 
 	if result[0] != "error" {
 		t.Errorf("expected error response, got '%v'", result[0])
@@ -270,7 +270,7 @@ func TestProcessMethodCall_NonStringMethodName_ReturnsError(t *testing.T) {
 	ctx := context.Background()
 
 	call := []any{123, map[string]any{}, "c0"}
-	result := processMethodCall(ctx, "user-123", call, 0, "req-123", nil, nil)
+	result := processMethodCall(ctx, "user-123", call, 0, "req-123", nil, nil, "", "")
 
 	if result[0] != "error" {
 		t.Errorf("expected error response, got '%v'", result[0])
@@ -736,5 +736,114 @@ func TestHandler_ResultReference_ConflictingKeys_ReturnsError(t *testing.T) {
 	errorType, ok := respArgs["type"].(string)
 	if !ok || errorType != "invalidArguments" {
 		t.Errorf("expected error type 'invalidArguments', got '%v'", respArgs["type"])
+	}
+}
+
+func TestHandler_PopulatesCDNURLAndAPIURL(t *testing.T) {
+	var capturedReq plugin.PluginInvocationRequest
+	invoker := &mockInvoker{
+		invokeFunc: func(ctx context.Context, target plugin.MethodTarget, request plugin.PluginInvocationRequest) (*plugin.PluginInvocationResponse, error) {
+			capturedReq = request
+			return &plugin.PluginInvocationResponse{
+				MethodResponse: plugin.MethodResponse{
+					Name:     request.Method,
+					Args:     map[string]any{"accountId": request.AccountID},
+					ClientID: request.ClientID,
+				},
+			}, nil
+		},
+	}
+
+	setupTestDepsWithMethods(invoker)
+
+	// Set env vars that handler() reads
+	t.Setenv("API_DOMAIN", "jmap.example.com")
+	t.Setenv("AWS_REGION", "us-east-1")
+
+	ctx := context.Background()
+
+	request := events.APIGatewayProxyRequest{
+		Body: `{"using":[],"methodCalls":[["Email/query",{"accountId":"user-123"},"c0"]]}`,
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "test-request-id",
+			Stage:     "v1",
+			APIID:     "abc123",
+			Authorizer: map[string]any{
+				"claims": map[string]any{
+					"sub": "user-123",
+				},
+			},
+		},
+	}
+
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	if response.StatusCode != 200 {
+		t.Fatalf("expected status code 200, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+
+	if capturedReq.CDNURL != "https://jmap.example.com/v1" {
+		t.Errorf("expected CDNURL 'https://jmap.example.com/v1', got %q", capturedReq.CDNURL)
+	}
+
+	if capturedReq.APIURL != "https://abc123.execute-api.us-east-1.amazonaws.com/v1" {
+		t.Errorf("expected APIURL 'https://abc123.execute-api.us-east-1.amazonaws.com/v1', got %q", capturedReq.APIURL)
+	}
+}
+
+func TestHandler_CDNURLAndAPIURL_DefaultStage(t *testing.T) {
+	var capturedReq plugin.PluginInvocationRequest
+	invoker := &mockInvoker{
+		invokeFunc: func(ctx context.Context, target plugin.MethodTarget, request plugin.PluginInvocationRequest) (*plugin.PluginInvocationResponse, error) {
+			capturedReq = request
+			return &plugin.PluginInvocationResponse{
+				MethodResponse: plugin.MethodResponse{
+					Name:     request.Method,
+					Args:     map[string]any{"accountId": request.AccountID},
+					ClientID: request.ClientID,
+				},
+			}, nil
+		},
+	}
+
+	setupTestDepsWithMethods(invoker)
+
+	t.Setenv("API_DOMAIN", "jmap.example.com")
+	t.Setenv("AWS_REGION", "us-east-1")
+
+	ctx := context.Background()
+
+	// No Stage set — should default to "v1"
+	request := events.APIGatewayProxyRequest{
+		Body: `{"using":[],"methodCalls":[["Email/query",{"accountId":"user-123"},"c0"]]}`,
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "test-request-id",
+			APIID:     "abc123",
+			Authorizer: map[string]any{
+				"claims": map[string]any{
+					"sub": "user-123",
+				},
+			},
+		},
+	}
+
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	if response.StatusCode != 200 {
+		t.Fatalf("expected status code 200, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+
+	if capturedReq.CDNURL != "https://jmap.example.com/v1" {
+		t.Errorf("expected CDNURL with default stage 'https://jmap.example.com/v1', got %q", capturedReq.CDNURL)
+	}
+
+	if capturedReq.APIURL != "https://abc123.execute-api.us-east-1.amazonaws.com/v1" {
+		t.Errorf("expected APIURL with default stage 'https://abc123.execute-api.us-east-1.amazonaws.com/v1', got %q", capturedReq.APIURL)
 	}
 }

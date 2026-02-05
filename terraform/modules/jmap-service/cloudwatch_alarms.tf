@@ -26,6 +26,7 @@ resource "aws_cloudwatch_metric_alarm" "api_5xx_errors" {
 
   dimensions = {
     ApiName = aws_api_gateway_rest_api.api.name
+    Stage   = aws_api_gateway_stage.v1.stage_name
   }
 
   alarm_actions = [var.alarm_sns_topic_arn]
@@ -53,6 +54,7 @@ resource "aws_cloudwatch_metric_alarm" "api_4xx_high" {
 
   dimensions = {
     ApiName = aws_api_gateway_rest_api.api.name
+    Stage   = aws_api_gateway_stage.v1.stage_name
   }
 
   alarm_actions = [var.alarm_sns_topic_arn]
@@ -80,6 +82,7 @@ resource "aws_cloudwatch_metric_alarm" "api_latency_high" {
 
   dimensions = {
     ApiName = aws_api_gateway_rest_api.api.name
+    Stage   = aws_api_gateway_stage.v1.stage_name
   }
 
   alarm_actions = [var.alarm_sns_topic_arn]

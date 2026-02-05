@@ -171,7 +171,7 @@ class TestBlobAllocate:
         session_url = f"https://{jmap_host}/.well-known/jmap"
         response = requests.get(
             session_url,
-            headers={"Authorization": f"Bearer {token}"},
+            headers={"Authorization": f"Bearer {token}", "X-JMAP-Stage": "e2e"},
             timeout=30,
         )
         assert response.status_code == 200, f"Session request failed: {response.status_code}"
@@ -312,7 +312,7 @@ class TestBlobAllocate:
         session_url = f"https://{jmap_host}/.well-known/jmap"
         session_resp = requests.get(
             session_url,
-            headers={"Authorization": f"Bearer {token}"},
+            headers={"Authorization": f"Bearer {token}", "X-JMAP-Stage": "e2e"},
             timeout=30,
         )
         session_data = session_resp.json()
@@ -571,7 +571,7 @@ class TestBlobAllocateLimits:
         session_url = f"https://{jmap_host}/.well-known/jmap"
         session_resp = requests.get(
             session_url,
-            headers={"Authorization": f"Bearer {token}"},
+            headers={"Authorization": f"Bearer {token}", "X-JMAP-Stage": "e2e"},
             timeout=30,
         )
         session_data = session_resp.json()

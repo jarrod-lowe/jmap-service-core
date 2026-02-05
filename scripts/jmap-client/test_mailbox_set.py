@@ -195,7 +195,7 @@ class TestMailboxSetDestroy:
         session_url = f"https://{jmap_host}/.well-known/jmap"
         resp = requests.get(
             session_url,
-            headers={"Authorization": f"Bearer {token}"},
+            headers={"Authorization": f"Bearer {token}", "X-JMAP-Stage": "e2e"},
             timeout=30,
         )
         assert resp.status_code == 200, f"Session request failed: {resp.status_code}"
