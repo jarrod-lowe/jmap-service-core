@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/jarrod-lowe/jmap-service-core/internal/resultref"
+	"github.com/jarrod-lowe/jmap-service-libs/plugincontract"
 )
 
 // CallProcessor processes a single JMAP method call
@@ -213,7 +214,12 @@ func toMethodResponse(resp []any) resultref.MethodResponse {
 		name, _ = resp[0].(string)
 	}
 	if len(resp) >= 2 {
-		args, _ = resp[1].(map[string]any)
+		switch v := resp[1].(type) {
+		case map[string]any:
+			args = v
+		case plugincontract.Args:
+			args = map[string]any(v)
+		}
 	}
 	if len(resp) >= 3 {
 		clientID, _ = resp[2].(string)
