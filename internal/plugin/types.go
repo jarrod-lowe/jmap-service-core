@@ -1,6 +1,6 @@
 package plugin
 
-import "github.com/jarrod-lowe/jmap-service-core/pkg/plugincontract"
+import "github.com/jarrod-lowe/jmap-service-libs/plugincontract"
 
 // Type aliases for exported plugin contract types
 type PluginInvocationRequest = plugincontract.PluginInvocationRequest

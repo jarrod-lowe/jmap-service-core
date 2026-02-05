@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/jarrod-lowe/jmap-service-core/pkg/plugincontract"
+	"github.com/jarrod-lowe/jmap-service-libs/plugincontract"
 )
 
 func TestHandler_EchoesArgsExactly(t *testing.T) {
@@ -16,7 +16,7 @@ func TestHandler_EchoesArgsExactly(t *testing.T) {
 		CallIndex: 0,
 		AccountID: "user-123",
 		Method:    "Core/echo",
-		Args:      map[string]any{"hello": true, "count": float64(42)},
+		Args:      plugincontract.Args{"hello": true, "count": float64(42)},
 		ClientID:  "c1",
 	}
 
@@ -38,7 +38,7 @@ func TestHandler_PreservesClientID(t *testing.T) {
 		CallIndex: 0,
 		AccountID: "user-123",
 		Method:    "Core/echo",
-		Args:      map[string]any{},
+		Args:      plugincontract.Args{},
 		ClientID:  "my-client-id-abc",
 	}
 
@@ -60,7 +60,7 @@ func TestHandler_ResponseNameIsCoreEcho(t *testing.T) {
 		CallIndex: 0,
 		AccountID: "user-123",
 		Method:    "Core/echo",
-		Args:      map[string]any{"test": "value"},
+		Args:      plugincontract.Args{"test": "value"},
 		ClientID:  "c1",
 	}
 
@@ -82,7 +82,7 @@ func TestHandler_HandlesEmptyArgs(t *testing.T) {
 		CallIndex: 0,
 		AccountID: "user-123",
 		Method:    "Core/echo",
-		Args:      map[string]any{},
+		Args:      plugincontract.Args{},
 		ClientID:  "c1",
 	}
 
@@ -99,7 +99,7 @@ func TestHandler_HandlesEmptyArgs(t *testing.T) {
 func TestHandler_HandlesNestedObjects(t *testing.T) {
 	ctx := context.Background()
 
-	nestedArgs := map[string]any{
+	nestedArgs := plugincontract.Args{
 		"level1": map[string]any{
 			"level2": map[string]any{
 				"value": "deep",
