@@ -35,6 +35,7 @@ type CleanupInput struct {
 	AccountID string
 	BlobID    string
 	Size      int64
+	IAMAuth   bool
 }
 
 func (m *MockDB) GetExpiredPendingAllocations(ctx context.Context, cutoff time.Time) ([]PendingAllocation, error) {
@@ -42,12 +43,13 @@ func (m *MockDB) GetExpiredPendingAllocations(ctx context.Context, cutoff time.T
 	return m.GetExpiredPendingResult, m.GetExpiredPendingErr
 }
 
-func (m *MockDB) CleanupAllocation(ctx context.Context, accountID, blobID string, size int64) error {
+func (m *MockDB) CleanupAllocation(ctx context.Context, accountID, blobID string, size int64, iamAuth bool) error {
 	m.CleanupAllocationCalled = true
 	m.CleanupAllocationInputs = append(m.CleanupAllocationInputs, CleanupInput{
 		AccountID: accountID,
 		BlobID:    blobID,
 		Size:      size,
+		IAMAuth:   iamAuth,
 	})
 	return m.CleanupAllocationErr
 }
@@ -170,6 +172,60 @@ func TestHandler_DBCleanupFails_ContinuesWithOthers(t *testing.T) {
 	// Both S3 objects should have been attempted
 	if len(mockStorage.DeleteObjectKeys) != 2 {
 		t.Errorf("expected 2 S3 delete attempts, got %d", len(mockStorage.DeleteObjectKeys))
+	}
+}
+
+func TestHandler_IAMAuth_PassesIAMAuthToCleanup(t *testing.T) {
+	mockStorage := &MockStorage{}
+	mockDB := &MockDB{
+		GetExpiredPendingResult: []PendingAllocation{
+			{AccountID: "account-1", BlobID: "blob-1", S3Key: "account-1/blob-1", Size: 0, IAMAuth: true},
+		},
+	}
+
+	deps = &Dependencies{
+		Storage:     mockStorage,
+		DB:          mockDB,
+		BufferHours: 72,
+	}
+
+	err := handler(context.Background())
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if len(mockDB.CleanupAllocationInputs) != 1 {
+		t.Fatalf("expected 1 cleanup call, got %d", len(mockDB.CleanupAllocationInputs))
+	}
+	if !mockDB.CleanupAllocationInputs[0].IAMAuth {
+		t.Error("expected IAMAuth=true to be passed to CleanupAllocation")
+	}
+}
+
+func TestHandler_NonIAMAuth_PassesIAMAuthFalse(t *testing.T) {
+	mockStorage := &MockStorage{}
+	mockDB := &MockDB{
+		GetExpiredPendingResult: []PendingAllocation{
+			{AccountID: "account-1", BlobID: "blob-1", S3Key: "account-1/blob-1", Size: 1024, IAMAuth: false},
+		},
+	}
+
+	deps = &Dependencies{
+		Storage:     mockStorage,
+		DB:          mockDB,
+		BufferHours: 72,
+	}
+
+	err := handler(context.Background())
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if len(mockDB.CleanupAllocationInputs) != 1 {
+		t.Fatalf("expected 1 cleanup call, got %d", len(mockDB.CleanupAllocationInputs))
+	}
+	if mockDB.CleanupAllocationInputs[0].IAMAuth {
+		t.Error("expected IAMAuth=false for non-IAM allocation")
 	}
 }
 

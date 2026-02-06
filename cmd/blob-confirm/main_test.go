@@ -52,6 +52,7 @@ type ConfirmBlobInput struct {
 	BlobID      string
 	ActualSize  int64
 	SizeUnknown bool
+	IAMAuth     bool
 }
 
 func (m *MockDB) GetBlobInfo(ctx context.Context, accountID, blobID string) (*BlobInfo, error) {
@@ -60,9 +61,9 @@ func (m *MockDB) GetBlobInfo(ctx context.Context, accountID, blobID string) (*Bl
 	return m.GetBlobInfoResult, m.GetBlobInfoErr
 }
 
-func (m *MockDB) ConfirmBlob(ctx context.Context, accountID, blobID string, actualSize int64, sizeUnknown bool) error {
+func (m *MockDB) ConfirmBlob(ctx context.Context, accountID, blobID string, actualSize int64, sizeUnknown bool, iamAuth bool) error {
 	m.ConfirmBlobCalled = true
-	m.ConfirmBlobInput = ConfirmBlobInput{AccountID: accountID, BlobID: blobID, ActualSize: actualSize, SizeUnknown: sizeUnknown}
+	m.ConfirmBlobInput = ConfirmBlobInput{AccountID: accountID, BlobID: blobID, ActualSize: actualSize, SizeUnknown: sizeUnknown, IAMAuth: iamAuth}
 	return m.ConfirmBlobErr
 }
 
@@ -351,6 +352,76 @@ func TestHandler_KnownSize_ConfirmWithZeroActualSize(t *testing.T) {
 	// ActualSize should still be passed through
 	if mockDB.ConfirmBlobInput.ActualSize != 1024 {
 		t.Errorf("expected ActualSize 1024, got %d", mockDB.ConfirmBlobInput.ActualSize)
+	}
+}
+
+func TestHandler_IAMAuth_PassesIAMAuthToConfirmBlob(t *testing.T) {
+	mockStorage := &MockStorage{}
+	mockDB := &MockDB{
+		GetBlobInfoResult: &BlobInfo{Status: "pending", IAMAuth: true},
+	}
+
+	deps = &Dependencies{
+		Storage: mockStorage,
+		DB:      mockDB,
+	}
+
+	event := events.S3Event{
+		Records: []events.S3EventRecord{
+			{
+				S3: events.S3Entity{
+					Bucket: events.S3Bucket{Name: "test-bucket"},
+					Object: events.S3Object{Key: "account-123/blob-456", Size: 5000},
+				},
+			},
+		},
+	}
+
+	err := handler(context.Background(), event)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if !mockDB.ConfirmBlobCalled {
+		t.Fatal("expected ConfirmBlob to be called")
+	}
+	if !mockDB.ConfirmBlobInput.IAMAuth {
+		t.Error("expected IAMAuth=true to be passed to ConfirmBlob")
+	}
+}
+
+func TestHandler_NonIAMAuth_PassesIAMAuthFalse(t *testing.T) {
+	mockStorage := &MockStorage{}
+	mockDB := &MockDB{
+		GetBlobInfoResult: &BlobInfo{Status: "pending", IAMAuth: false},
+	}
+
+	deps = &Dependencies{
+		Storage: mockStorage,
+		DB:      mockDB,
+	}
+
+	event := events.S3Event{
+		Records: []events.S3EventRecord{
+			{
+				S3: events.S3Entity{
+					Bucket: events.S3Bucket{Name: "test-bucket"},
+					Object: events.S3Object{Key: "account-123/blob-456", Size: 1024},
+				},
+			},
+		},
+	}
+
+	err := handler(context.Background(), event)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if !mockDB.ConfirmBlobCalled {
+		t.Fatal("expected ConfirmBlob to be called")
+	}
+	if mockDB.ConfirmBlobInput.IAMAuth {
+		t.Error("expected IAMAuth=false for non-IAM blob")
 	}
 }
 

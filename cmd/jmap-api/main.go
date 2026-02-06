@@ -387,6 +387,7 @@ func handleBlobAllocate(ctx context.Context, accountID string, args map[string]a
 			Size:        int64(size),
 			SizeUnknown: (isIAMAuth && int64(size) == 0) || multipart,
 			Multipart:   multipart,
+			IsIAMAuth:   isIAMAuth,
 		}
 
 		resp, err := deps.BlobAllocator.Allocate(ctx, req)

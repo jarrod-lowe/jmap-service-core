@@ -54,9 +54,10 @@ type AllocateInput struct {
 	URLExpiresAt time.Time
 	SizeUnknown  bool
 	UploadID     string
+	IsIAMAuth    bool
 }
 
-func (m *MockDB) AllocateBlob(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpiresAt time.Time, maxPending int, s3Key string, sizeUnknown bool, uploadID string) error {
+func (m *MockDB) AllocateBlob(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpiresAt time.Time, maxPending int, s3Key string, sizeUnknown bool, uploadID string, isIAMAuth bool) error {
 	m.AllocateCalled = true
 	m.AllocateInput = AllocateInput{
 		AccountID:    accountID,
@@ -66,6 +67,7 @@ func (m *MockDB) AllocateBlob(ctx context.Context, accountID, blobID string, siz
 		URLExpiresAt: urlExpiresAt,
 		SizeUnknown:  sizeUnknown,
 		UploadID:     uploadID,
+		IsIAMAuth:    isIAMAuth,
 	}
 	if m.AllocateErrType != "" {
 		return &AllocationError{Type: m.AllocateErrType, Message: "test error"}
@@ -737,6 +739,108 @@ func TestAllocate_Multipart_DefaultPartCount(t *testing.T) {
 
 	if len(resp.Parts) != DefaultMultipartPartCount {
 		t.Errorf("expected %d parts (default), got %d", DefaultMultipartPartCount, len(resp.Parts))
+	}
+}
+
+func TestAllocate_IsIAMAuth_PassedToDB_SinglePut(t *testing.T) {
+	mockStorage := &MockStorage{
+		GeneratePresignedURLResult: "https://bucket.s3.amazonaws.com/signed-url",
+	}
+	mockDB := &MockDB{}
+	mockUUID := &MockUUIDGen{GenerateResult: "blob-iam"}
+
+	handler := &Handler{
+		Storage:          mockStorage,
+		DB:               mockDB,
+		UUIDGen:          mockUUID,
+		MaxSizeUploadPut: 250000000,
+		MaxPendingAllocs: 4,
+		URLExpirySecs:    900,
+	}
+
+	req := AllocateRequest{
+		AccountID:   "account-123",
+		Type:        "message/rfc822",
+		Size:        0,
+		SizeUnknown: true,
+		IsIAMAuth:   true,
+	}
+
+	_, err := handler.Allocate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if !mockDB.AllocateInput.IsIAMAuth {
+		t.Error("expected IsIAMAuth=true to be passed to DB.AllocateBlob")
+	}
+}
+
+func TestAllocate_IsIAMAuth_PassedToDB_Multipart(t *testing.T) {
+	mockMultipart := &MockMultipartStorage{
+		CreateMultipartUploadID: "upload-abc",
+	}
+	mockDB := &MockDB{}
+	mockUUID := &MockUUIDGen{GenerateResult: "blob-iam-mp"}
+
+	handler := &Handler{
+		Storage:            &MockStorage{},
+		MultipartStorage:   mockMultipart,
+		DB:                 mockDB,
+		UUIDGen:            mockUUID,
+		MaxSizeUploadPut:   250000000,
+		MaxPendingAllocs:   4,
+		URLExpirySecs:      900,
+		MultipartPartCount: 3,
+	}
+
+	req := AllocateRequest{
+		AccountID:   "account-123",
+		Type:        "message/rfc822",
+		SizeUnknown: true,
+		Multipart:   true,
+		IsIAMAuth:   true,
+	}
+
+	_, err := handler.Allocate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if !mockDB.AllocateInput.IsIAMAuth {
+		t.Error("expected IsIAMAuth=true to be passed to DB.AllocateBlob for multipart")
+	}
+}
+
+func TestAllocate_NonIAMAuth_PassesFalse(t *testing.T) {
+	mockStorage := &MockStorage{
+		GeneratePresignedURLResult: "https://bucket.s3.amazonaws.com/signed-url",
+	}
+	mockDB := &MockDB{}
+	mockUUID := &MockUUIDGen{GenerateResult: "blob-cognito"}
+
+	handler := &Handler{
+		Storage:          mockStorage,
+		DB:               mockDB,
+		UUIDGen:          mockUUID,
+		MaxSizeUploadPut: 250000000,
+		MaxPendingAllocs: 4,
+		URLExpirySecs:    900,
+	}
+
+	req := AllocateRequest{
+		AccountID: "account-123",
+		Type:      "application/pdf",
+		Size:      1024,
+	}
+
+	_, err := handler.Allocate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if mockDB.AllocateInput.IsIAMAuth {
+		t.Error("expected IsIAMAuth=false for non-IAM request")
 	}
 }
 

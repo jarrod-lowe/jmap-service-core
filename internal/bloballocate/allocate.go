@@ -14,6 +14,7 @@ type AllocateRequest struct {
 	Size        int64  `json:"size"`        // Size in bytes
 	SizeUnknown bool   `json:"sizeUnknown"` // True when size is not declared (IAM path)
 	Multipart   bool   `json:"multipart"`   // True for multipart upload (IAM-only)
+	IsIAMAuth   bool   `json:"-"`           // True when request is IAM-authenticated
 }
 
 // AllocateResponse is the Blob/allocate method response
@@ -51,7 +52,7 @@ type MultipartStorage interface {
 
 // DB handles DynamoDB operations for blob allocation
 type DB interface {
-	AllocateBlob(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpiresAt time.Time, maxPending int, s3Key string, sizeUnknown bool, uploadID string) error
+	AllocateBlob(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpiresAt time.Time, maxPending int, s3Key string, sizeUnknown bool, uploadID string, isIAMAuth bool) error
 }
 
 // UUIDGenerator generates unique IDs
@@ -117,7 +118,7 @@ func (h *Handler) allocateSinglePut(ctx context.Context, req AllocateRequest, bl
 		return nil, &AllocationError{Type: "serverFail", Message: "failed to generate upload URL"}
 	}
 
-	if err := h.DB.AllocateBlob(ctx, req.AccountID, blobID, req.Size, req.Type, urlExpires, h.MaxPendingAllocs, s3Key, req.SizeUnknown, ""); err != nil {
+	if err := h.DB.AllocateBlob(ctx, req.AccountID, blobID, req.Size, req.Type, urlExpires, h.MaxPendingAllocs, s3Key, req.SizeUnknown, "", req.IsIAMAuth); err != nil {
 		if allocErr, ok := err.(*AllocationError); ok {
 			return nil, allocErr
 		}
@@ -154,7 +155,7 @@ func (h *Handler) allocateMultipart(ctx context.Context, req AllocateRequest, bl
 	}
 
 	// Store allocation with upload ID
-	if err := h.DB.AllocateBlob(ctx, req.AccountID, blobID, 0, req.Type, urlExpires, h.MaxPendingAllocs, s3Key, true, uploadID); err != nil {
+	if err := h.DB.AllocateBlob(ctx, req.AccountID, blobID, 0, req.Type, urlExpires, h.MaxPendingAllocs, s3Key, true, uploadID, req.IsIAMAuth); err != nil {
 		if allocErr, ok := err.(*AllocationError); ok {
 			return nil, allocErr
 		}

@@ -864,10 +864,12 @@ func (m *mockBlobAllocateStorage) GeneratePresignedPutURL(ctx context.Context, a
 // mockBlobAllocateDB captures AllocateBlob calls
 type mockBlobAllocateDB struct {
 	lastSizeUnknown bool
+	lastIsIAMAuth   bool
 }
 
-func (m *mockBlobAllocateDB) AllocateBlob(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpiresAt time.Time, maxPending int, s3Key string, sizeUnknown bool, uploadID string) error {
+func (m *mockBlobAllocateDB) AllocateBlob(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpiresAt time.Time, maxPending int, s3Key string, sizeUnknown bool, uploadID string, isIAMAuth bool) error {
 	m.lastSizeUnknown = sizeUnknown
+	m.lastIsIAMAuth = isIAMAuth
 	return nil
 }
 
@@ -941,6 +943,71 @@ func TestHandler_BlobAllocate_IAMAuth_SizeZero_SetsSizeUnknown(t *testing.T) {
 	}
 	if jmapResp.MethodResponses[0][0] != "Blob/allocate" {
 		t.Errorf("expected Blob/allocate response, got %v", jmapResp.MethodResponses[0][0])
+	}
+}
+
+func TestHandler_BlobAllocate_IAMAuth_SetsIsIAMAuth(t *testing.T) {
+	mockStorage := &mockBlobAllocateStorage{}
+	mockDB := &mockBlobAllocateDB{}
+	setupTestDepsWithBlobAllocator(mockStorage, mockDB, []string{"arn:aws:iam::123456789012:role/IngestRole"})
+	ctx := context.Background()
+
+	request := events.APIGatewayProxyRequest{
+		Path: "/jmap-iam/user-123",
+		Body: `{"using":["https://jmap.rrod.net/extensions/upload-put"],"methodCalls":[["Blob/allocate",{"accountId":"user-123","create":{"c1":{"type":"message/rfc822","size":0}}},"a0"]]}`,
+		PathParameters: map[string]string{
+			"accountId": "user-123",
+		},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "test-request-id",
+			Identity: events.APIGatewayRequestIdentity{
+				UserArn: "arn:aws:iam::123456789012:role/IngestRole",
+			},
+		},
+	}
+
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if response.StatusCode != 200 {
+		t.Fatalf("expected status code 200, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+
+	if !mockDB.lastIsIAMAuth {
+		t.Error("expected IsIAMAuth=true to be passed to DB for IAM auth request")
+	}
+}
+
+func TestHandler_BlobAllocate_CognitoAuth_IsIAMAuthFalse(t *testing.T) {
+	mockStorage := &mockBlobAllocateStorage{}
+	mockDB := &mockBlobAllocateDB{}
+	setupTestDepsWithBlobAllocator(mockStorage, mockDB, nil)
+	ctx := context.Background()
+
+	request := events.APIGatewayProxyRequest{
+		Path: "/jmap",
+		Body: `{"using":["https://jmap.rrod.net/extensions/upload-put"],"methodCalls":[["Blob/allocate",{"accountId":"user-123","create":{"c1":{"type":"application/pdf","size":1024}}},"a0"]]}`,
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "test-request-id",
+			Authorizer: map[string]any{
+				"claims": map[string]any{
+					"sub": "user-123",
+				},
+			},
+		},
+	}
+
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if response.StatusCode != 200 {
+		t.Fatalf("expected status code 200, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+
+	if mockDB.lastIsIAMAuth {
+		t.Error("expected IsIAMAuth=false for Cognito auth request")
 	}
 }
 

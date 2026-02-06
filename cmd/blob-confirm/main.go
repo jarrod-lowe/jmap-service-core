@@ -33,12 +33,13 @@ type ConfirmStorage interface {
 type BlobInfo struct {
 	Status      string
 	SizeUnknown bool
+	IAMAuth     bool
 }
 
 // ConfirmDB handles DynamoDB operations for blob confirmation
 type ConfirmDB interface {
 	GetBlobInfo(ctx context.Context, accountID, blobID string) (*BlobInfo, error)
-	ConfirmBlob(ctx context.Context, accountID, blobID string, actualSize int64, sizeUnknown bool) error
+	ConfirmBlob(ctx context.Context, accountID, blobID string, actualSize int64, sizeUnknown bool, iamAuth bool) error
 }
 
 // Dependencies for handler (injectable for testing)
@@ -136,7 +137,7 @@ func handler(ctx context.Context, event events.S3Event) error {
 
 		// Confirm blob in DynamoDB (update status, remove GSI keys, decrement pending count)
 		actualSize := record.S3.Object.Size
-		if err := deps.DB.ConfirmBlob(ctx, accountID, blobID, actualSize, blobInfo.SizeUnknown); err != nil {
+		if err := deps.DB.ConfirmBlob(ctx, accountID, blobID, actualSize, blobInfo.SizeUnknown, blobInfo.IAMAuth); err != nil {
 			logger.ErrorContext(ctx, "Failed to confirm blob in DynamoDB",
 				slog.String("account_id", accountID),
 				slog.String("blob_id", blobID),
@@ -227,7 +228,7 @@ func (d *DynamoDBConfirmStore) GetBlobInfo(ctx context.Context, accountID, blobI
 			"pk": &types.AttributeValueMemberS{Value: fmt.Sprintf("ACCOUNT#%s", accountID)},
 			"sk": &types.AttributeValueMemberS{Value: fmt.Sprintf("BLOB#%s", blobID)},
 		},
-		ProjectionExpression: aws.String("#status, sizeUnknown"),
+		ProjectionExpression: aws.String("#status, sizeUnknown, iamAuth"),
 		ExpressionAttributeNames: map[string]string{
 			"#status": "status",
 		},
@@ -250,12 +251,17 @@ func (d *DynamoDBConfirmStore) GetBlobInfo(ctx context.Context, accountID, blobI
 		info.SizeUnknown = suAttr.Value
 	}
 
+	if iaAttr, ok := result.Item["iamAuth"].(*types.AttributeValueMemberBOOL); ok {
+		info.IAMAuth = iaAttr.Value
+	}
+
 	return info, nil
 }
 
 // ConfirmBlob updates the blob status to confirmed and decrements the pending count.
 // When sizeUnknown is true, it also sets the actual size and deducts quota.
-func (d *DynamoDBConfirmStore) ConfirmBlob(ctx context.Context, accountID, blobID string, actualSize int64, sizeUnknown bool) error {
+// When iamAuth is true, skips pending allocations count decrement.
+func (d *DynamoDBConfirmStore) ConfirmBlob(ctx context.Context, accountID, blobID string, actualSize int64, sizeUnknown bool, iamAuth bool) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	blobKey := map[string]types.AttributeValue{
@@ -292,17 +298,26 @@ func (d *DynamoDBConfirmStore) ConfirmBlob(ctx context.Context, accountID, blobI
 		ExpressionAttributeValues: blobExprValues,
 	}
 
-	// Build META# update: decrement pending count, and deduct quota if size was unknown
-	metaUpdateExpr := "ADD pendingAllocationsCount :negOne SET updatedAt = :now"
+	// Build META# update: decrement pending count (unless IAM auth), and deduct quota if size was unknown
+	var metaUpdateExpr string
 	metaValues := map[string]types.AttributeValue{
-		":negOne": &types.AttributeValueMemberN{Value: "-1"},
-		":now":    &types.AttributeValueMemberS{Value: now},
+		":now": &types.AttributeValueMemberS{Value: now},
 	}
 
-	// When size was unknown, also deduct quota now
-	if sizeUnknown {
-		metaUpdateExpr = "ADD pendingAllocationsCount :negOne, quotaRemaining :negSize SET updatedAt = :now"
-		metaValues[":negSize"] = &types.AttributeValueMemberN{Value: fmt.Sprintf("-%d", actualSize)}
+	if iamAuth {
+		// IAM auth: no pending count to decrement
+		metaUpdateExpr = "SET updatedAt = :now"
+		if sizeUnknown {
+			metaUpdateExpr = "ADD quotaRemaining :negSize SET updatedAt = :now"
+			metaValues[":negSize"] = &types.AttributeValueMemberN{Value: fmt.Sprintf("-%d", actualSize)}
+		}
+	} else {
+		metaUpdateExpr = "ADD pendingAllocationsCount :negOne SET updatedAt = :now"
+		metaValues[":negOne"] = &types.AttributeValueMemberN{Value: "-1"}
+		if sizeUnknown {
+			metaUpdateExpr = "ADD pendingAllocationsCount :negOne, quotaRemaining :negSize SET updatedAt = :now"
+			metaValues[":negSize"] = &types.AttributeValueMemberN{Value: fmt.Sprintf("-%d", actualSize)}
+		}
 	}
 
 	metaUpdate := &types.Update{

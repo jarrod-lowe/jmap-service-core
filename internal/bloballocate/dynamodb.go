@@ -35,7 +35,7 @@ func NewDynamoDBStore(client DynamoDBClient, tableName string) *DynamoDBStore {
 // AllocateBlob creates a pending allocation record with a transactional write
 // that also updates the account META# record (pendingAllocationsCount, quotaRemaining).
 // When uploadID is non-empty, stores it on the blob record for multipart upload tracking.
-func (d *DynamoDBStore) AllocateBlob(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpiresAt time.Time, maxPending int, s3Key string, sizeUnknown bool, uploadID string) error {
+func (d *DynamoDBStore) AllocateBlob(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpiresAt time.Time, maxPending int, s3Key string, sizeUnknown bool, uploadID string, isIAMAuth bool) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	urlExpiresAtStr := urlExpiresAt.UTC().Format(time.RFC3339)
 
@@ -62,6 +62,9 @@ func (d *DynamoDBStore) AllocateBlob(ctx context.Context, accountID, blobID stri
 	if sizeUnknown {
 		blobItem["sizeUnknown"] = true
 	}
+	if isIAMAuth {
+		blobItem["iamAuth"] = true
+	}
 	if uploadID != "" {
 		blobItem["uploadId"] = uploadID
 		blobItem["multipart"] = true
@@ -78,19 +81,31 @@ func (d *DynamoDBStore) AllocateBlob(ctx context.Context, accountID, blobID stri
 		"sk": &types.AttributeValueMemberS{Value: "META#"},
 	}
 
-	// Build META# update: when size is unknown, only increment pending count (no quota deduction).
-	// Quota will be deducted at confirm time using the actual S3 object size.
-	updateExpr := "ADD pendingAllocationsCount :one SET updatedAt = :now"
-	conditionExpr := "attribute_exists(pk) AND pendingAllocationsCount < :max"
+	// Build META# update expression and condition.
+	// IAM auth: skip pending allocations count (no increment, no limit check).
+	// Non-IAM: include pending count increment and limit check.
+	var updateExpr, conditionExpr string
 	exprValues := map[string]types.AttributeValue{
-		":one": &types.AttributeValueMemberN{Value: "1"},
-		":max": &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", maxPending)},
 		":now": &types.AttributeValueMemberS{Value: now},
 	}
 
-	// When size is known, also deduct quota
+	if isIAMAuth {
+		updateExpr = "SET updatedAt = :now"
+		conditionExpr = "attribute_exists(pk)"
+	} else {
+		updateExpr = "ADD pendingAllocationsCount :one SET updatedAt = :now"
+		conditionExpr = "attribute_exists(pk) AND pendingAllocationsCount < :max"
+		exprValues[":one"] = &types.AttributeValueMemberN{Value: "1"}
+		exprValues[":max"] = &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", maxPending)}
+	}
+
+	// When size is known, also deduct quota (applies to both IAM and non-IAM)
 	if !sizeUnknown {
-		updateExpr = "ADD pendingAllocationsCount :one, quotaRemaining :negSize SET updatedAt = :now"
+		if isIAMAuth {
+			updateExpr = "ADD quotaRemaining :negSize SET updatedAt = :now"
+		} else {
+			updateExpr = "ADD pendingAllocationsCount :one, quotaRemaining :negSize SET updatedAt = :now"
+		}
 		conditionExpr += " AND quotaRemaining >= :size"
 		exprValues[":negSize"] = &types.AttributeValueMemberN{Value: fmt.Sprintf("-%d", size)}
 		exprValues[":size"] = &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", size)}
@@ -131,7 +146,7 @@ func (d *DynamoDBStore) AllocateBlob(ctx context.Context, accountID, blobID stri
 						// META# update condition failed
 						// Could be: account not provisioned, too many pending, or over quota
 						// We need to distinguish these cases
-						return d.diagnoseMetaConditionFailure(ctx, accountID, maxPending, size, sizeUnknown)
+						return d.diagnoseMetaConditionFailure(ctx, accountID, maxPending, size, sizeUnknown, isIAMAuth)
 					}
 					// Blob record already exists (unlikely with UUID)
 					return fmt.Errorf("blob record already exists")
@@ -145,7 +160,7 @@ func (d *DynamoDBStore) AllocateBlob(ctx context.Context, accountID, blobID stri
 }
 
 // diagnoseMetaConditionFailure determines why the META# condition failed
-func (d *DynamoDBStore) diagnoseMetaConditionFailure(ctx context.Context, accountID string, maxPending int, size int64, sizeUnknown bool) error {
+func (d *DynamoDBStore) diagnoseMetaConditionFailure(ctx context.Context, accountID string, maxPending int, size int64, sizeUnknown bool, isIAMAuth bool) error {
 	// Query the META# record to determine which condition failed
 	result, err := d.client.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(d.tableName),
@@ -187,8 +202,8 @@ func (d *DynamoDBStore) diagnoseMetaConditionFailure(ctx context.Context, accoun
 		}
 	}
 
-	// Check which condition failed
-	if pendingCount >= maxPending {
+	// Check which condition failed (skip pending check for IAM auth)
+	if !isIAMAuth && pendingCount >= maxPending {
 		return &AllocationError{
 			Type:    "tooManyPending",
 			Message: fmt.Sprintf("Too many pending allocations (%d/%d)", pendingCount, maxPending),

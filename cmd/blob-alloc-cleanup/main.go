@@ -24,6 +24,7 @@ type PendingAllocation struct {
 	BlobID    string
 	S3Key     string
 	Size      int64
+	IAMAuth   bool
 }
 
 // CleanupStorage handles S3 operations for cleanup
@@ -34,7 +35,7 @@ type CleanupStorage interface {
 // CleanupDB handles DynamoDB operations for cleanup
 type CleanupDB interface {
 	GetExpiredPendingAllocations(ctx context.Context, cutoff time.Time) ([]PendingAllocation, error)
-	CleanupAllocation(ctx context.Context, accountID, blobID string, size int64) error
+	CleanupAllocation(ctx context.Context, accountID, blobID string, size int64, iamAuth bool) error
 }
 
 // Dependencies for handler (injectable for testing)
@@ -86,7 +87,7 @@ func handler(ctx context.Context) error {
 		}
 
 		// Clean up DynamoDB (delete blob record, restore quota)
-		if err := deps.DB.CleanupAllocation(ctx, alloc.AccountID, alloc.BlobID, alloc.Size); err != nil {
+		if err := deps.DB.CleanupAllocation(ctx, alloc.AccountID, alloc.BlobID, alloc.Size, alloc.IAMAuth); err != nil {
 			logger.ErrorContext(ctx, "Failed to cleanup DynamoDB record",
 				slog.String("account_id", alloc.AccountID),
 				slog.String("blob_id", alloc.BlobID),
@@ -196,6 +197,11 @@ func (d *DynamoDBCleanupStore) GetExpiredPendingAllocations(ctx context.Context,
 			alloc.Size, _ = strconv.ParseInt(sizeAttr.Value, 10, 64)
 		}
 
+		// Extract iamAuth flag
+		if iaAttr, ok := item["iamAuth"].(*types.AttributeValueMemberBOOL); ok {
+			alloc.IAMAuth = iaAttr.Value
+		}
+
 		if alloc.AccountID != "" && alloc.BlobID != "" {
 			allocations = append(allocations, alloc)
 		}
@@ -204,8 +210,9 @@ func (d *DynamoDBCleanupStore) GetExpiredPendingAllocations(ctx context.Context,
 	return allocations, nil
 }
 
-// CleanupAllocation deletes the blob record and restores quota atomically
-func (d *DynamoDBCleanupStore) CleanupAllocation(ctx context.Context, accountID, blobID string, size int64) error {
+// CleanupAllocation deletes the blob record and restores quota atomically.
+// When iamAuth is true, skips pending allocations count decrement.
+func (d *DynamoDBCleanupStore) CleanupAllocation(ctx context.Context, accountID, blobID string, size int64, iamAuth bool) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	_, err := d.client.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
@@ -227,26 +234,43 @@ func (d *DynamoDBCleanupStore) CleanupAllocation(ctx context.Context, accountID,
 					},
 				},
 			},
-			{
-				Update: &types.Update{
-					TableName: aws.String(d.tableName),
-					Key: map[string]types.AttributeValue{
-						"pk": &types.AttributeValueMemberS{Value: fmt.Sprintf("ACCOUNT#%s", accountID)},
-						"sk": &types.AttributeValueMemberS{Value: "META#"},
-					},
-					UpdateExpression: aws.String(
-						"ADD pendingAllocationsCount :negOne, quotaRemaining :size SET updatedAt = :now"),
-					ExpressionAttributeValues: map[string]types.AttributeValue{
-						":negOne": &types.AttributeValueMemberN{Value: "-1"},
-						":size":   &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", size)},
-						":now":    &types.AttributeValueMemberS{Value: now},
-					},
-				},
-			},
+			d.buildCleanupMetaUpdate(accountID, now, size, iamAuth),
 		},
 	})
 
 	return err
+}
+
+// buildCleanupMetaUpdate builds the META# update for cleanup.
+// IAM auth: only restore quota (no pending count to decrement).
+// Non-IAM: decrement pending count and restore quota.
+func (d *DynamoDBCleanupStore) buildCleanupMetaUpdate(accountID, now string, size int64, iamAuth bool) types.TransactWriteItem {
+	metaKey := map[string]types.AttributeValue{
+		"pk": &types.AttributeValueMemberS{Value: fmt.Sprintf("ACCOUNT#%s", accountID)},
+		"sk": &types.AttributeValueMemberS{Value: "META#"},
+	}
+
+	var updateExpr string
+	exprValues := map[string]types.AttributeValue{
+		":size": &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", size)},
+		":now":  &types.AttributeValueMemberS{Value: now},
+	}
+
+	if iamAuth {
+		updateExpr = "ADD quotaRemaining :size SET updatedAt = :now"
+	} else {
+		updateExpr = "ADD pendingAllocationsCount :negOne, quotaRemaining :size SET updatedAt = :now"
+		exprValues[":negOne"] = &types.AttributeValueMemberN{Value: "-1"}
+	}
+
+	return types.TransactWriteItem{
+		Update: &types.Update{
+			TableName:                 aws.String(d.tableName),
+			Key:                       metaKey,
+			UpdateExpression:          aws.String(updateExpr),
+			ExpressionAttributeValues: exprValues,
+		},
+	}
 }
 
 func main() {
