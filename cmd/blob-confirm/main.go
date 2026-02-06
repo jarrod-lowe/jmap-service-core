@@ -29,10 +29,16 @@ type ConfirmStorage interface {
 	DeleteObject(ctx context.Context, key string) error
 }
 
+// BlobInfo holds status and metadata about a blob record
+type BlobInfo struct {
+	Status      string
+	SizeUnknown bool
+}
+
 // ConfirmDB handles DynamoDB operations for blob confirmation
 type ConfirmDB interface {
-	GetBlobStatus(ctx context.Context, accountID, blobID string) (string, error)
-	ConfirmBlob(ctx context.Context, accountID, blobID string) error
+	GetBlobInfo(ctx context.Context, accountID, blobID string) (*BlobInfo, error)
+	ConfirmBlob(ctx context.Context, accountID, blobID string, actualSize int64, sizeUnknown bool) error
 }
 
 // Dependencies for handler (injectable for testing)
@@ -73,20 +79,20 @@ func handler(ctx context.Context, event events.S3Event) error {
 		span.SetAttributes(tracing.AccountID(accountID), tracing.BlobID(blobID))
 
 		// Check blob record status
-		status, err := deps.DB.GetBlobStatus(ctx, accountID, blobID)
+		blobInfo, err := deps.DB.GetBlobInfo(ctx, accountID, blobID)
 		if err != nil {
-			logger.ErrorContext(ctx, "Failed to get blob status",
+			logger.ErrorContext(ctx, "Failed to get blob info",
 				slog.String("account_id", accountID),
 				slog.String("blob_id", blobID),
 				slog.String("error", err.Error()),
 			)
-			return fmt.Errorf("failed to get blob status: %w", err)
+			return fmt.Errorf("failed to get blob info: %w", err)
 		}
 
 		// If record not found, skip - this object may be from a different upload path
 		// (e.g., traditional /upload/ endpoint) or the record may have been cleaned up.
 		// The blob-alloc-cleanup Lambda handles expired pending allocations.
-		if status == "" {
+		if blobInfo == nil {
 			logger.WarnContext(ctx, "Blob record not found, skipping (may be traditional upload)",
 				slog.String("account_id", accountID),
 				slog.String("blob_id", blobID),
@@ -95,7 +101,7 @@ func handler(ctx context.Context, event events.S3Event) error {
 		}
 
 		// If already confirmed, skip (idempotent)
-		if status == "confirmed" {
+		if blobInfo.Status == "confirmed" {
 			logger.InfoContext(ctx, "Blob already confirmed, skipping",
 				slog.String("account_id", accountID),
 				slog.String("blob_id", blobID),
@@ -129,7 +135,8 @@ func handler(ctx context.Context, event events.S3Event) error {
 		}
 
 		// Confirm blob in DynamoDB (update status, remove GSI keys, decrement pending count)
-		if err := deps.DB.ConfirmBlob(ctx, accountID, blobID); err != nil {
+		actualSize := record.S3.Object.Size
+		if err := deps.DB.ConfirmBlob(ctx, accountID, blobID, actualSize, blobInfo.SizeUnknown); err != nil {
 			logger.ErrorContext(ctx, "Failed to confirm blob in DynamoDB",
 				slog.String("account_id", accountID),
 				slog.String("blob_id", blobID),
@@ -211,78 +218,104 @@ func NewDynamoDBConfirmStore(client *dynamodb.Client, tableName string) *DynamoD
 	}
 }
 
-// GetBlobStatus returns the status of a blob record
-// Returns "" if not found, "pending" or "confirmed" otherwise
-func (d *DynamoDBConfirmStore) GetBlobStatus(ctx context.Context, accountID, blobID string) (string, error) {
+// GetBlobInfo returns status and metadata for a blob record.
+// Returns nil if not found.
+func (d *DynamoDBConfirmStore) GetBlobInfo(ctx context.Context, accountID, blobID string) (*BlobInfo, error) {
 	result, err := d.client.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(d.tableName),
 		Key: map[string]types.AttributeValue{
 			"pk": &types.AttributeValueMemberS{Value: fmt.Sprintf("ACCOUNT#%s", accountID)},
 			"sk": &types.AttributeValueMemberS{Value: fmt.Sprintf("BLOB#%s", blobID)},
 		},
-		ProjectionExpression: aws.String("#status"),
+		ProjectionExpression: aws.String("#status, sizeUnknown"),
 		ExpressionAttributeNames: map[string]string{
 			"#status": "status",
 		},
 	})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	if result.Item == nil {
-		return "", nil // Not found
+		return nil, nil // Not found
 	}
 
-	statusAttr, ok := result.Item["status"].(*types.AttributeValueMemberS)
-	if !ok {
-		return "", nil // Status attribute missing or wrong type
+	info := &BlobInfo{}
+
+	if statusAttr, ok := result.Item["status"].(*types.AttributeValueMemberS); ok {
+		info.Status = statusAttr.Value
 	}
 
-	return statusAttr.Value, nil
+	if suAttr, ok := result.Item["sizeUnknown"].(*types.AttributeValueMemberBOOL); ok {
+		info.SizeUnknown = suAttr.Value
+	}
+
+	return info, nil
 }
 
-// ConfirmBlob updates the blob status to confirmed and decrements the pending count
-func (d *DynamoDBConfirmStore) ConfirmBlob(ctx context.Context, accountID, blobID string) error {
+// ConfirmBlob updates the blob status to confirmed and decrements the pending count.
+// When sizeUnknown is true, it also sets the actual size and deducts quota.
+func (d *DynamoDBConfirmStore) ConfirmBlob(ctx context.Context, accountID, blobID string, actualSize int64, sizeUnknown bool) error {
 	now := time.Now().UTC().Format(time.RFC3339)
+
+	blobKey := map[string]types.AttributeValue{
+		"pk": &types.AttributeValueMemberS{Value: fmt.Sprintf("ACCOUNT#%s", accountID)},
+		"sk": &types.AttributeValueMemberS{Value: fmt.Sprintf("BLOB#%s", blobID)},
+	}
+	metaKey := map[string]types.AttributeValue{
+		"pk": &types.AttributeValueMemberS{Value: fmt.Sprintf("ACCOUNT#%s", accountID)},
+		"sk": &types.AttributeValueMemberS{Value: "META#"},
+	}
+
+	// Build blob record update: confirm status, remove GSI keys
+	blobUpdateExpr := "SET #status = :confirmed, confirmedAt = :now REMOVE gsi1pk, gsi1sk"
+	blobExprNames := map[string]string{"#status": "status"}
+	blobExprValues := map[string]types.AttributeValue{
+		":confirmed": &types.AttributeValueMemberS{Value: "confirmed"},
+		":pending":   &types.AttributeValueMemberS{Value: "pending"},
+		":now":       &types.AttributeValueMemberS{Value: now},
+	}
+
+	// When size was unknown, also set actual size and remove sizeUnknown attr
+	if sizeUnknown {
+		blobUpdateExpr = "SET #status = :confirmed, confirmedAt = :now, #size = :actualSize REMOVE gsi1pk, gsi1sk, sizeUnknown"
+		blobExprNames["#size"] = "size"
+		blobExprValues[":actualSize"] = &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", actualSize)}
+	}
+
+	blobUpdate := &types.Update{
+		TableName:                 aws.String(d.tableName),
+		Key:                       blobKey,
+		UpdateExpression:          aws.String(blobUpdateExpr),
+		ConditionExpression:       aws.String("#status = :pending"),
+		ExpressionAttributeNames:  blobExprNames,
+		ExpressionAttributeValues: blobExprValues,
+	}
+
+	// Build META# update: decrement pending count, and deduct quota if size was unknown
+	metaUpdateExpr := "ADD pendingAllocationsCount :negOne SET updatedAt = :now"
+	metaValues := map[string]types.AttributeValue{
+		":negOne": &types.AttributeValueMemberN{Value: "-1"},
+		":now":    &types.AttributeValueMemberS{Value: now},
+	}
+
+	// When size was unknown, also deduct quota now
+	if sizeUnknown {
+		metaUpdateExpr = "ADD pendingAllocationsCount :negOne, quotaRemaining :negSize SET updatedAt = :now"
+		metaValues[":negSize"] = &types.AttributeValueMemberN{Value: fmt.Sprintf("-%d", actualSize)}
+	}
+
+	metaUpdate := &types.Update{
+		TableName:                 aws.String(d.tableName),
+		Key:                       metaKey,
+		UpdateExpression:          aws.String(metaUpdateExpr),
+		ExpressionAttributeValues: metaValues,
+	}
 
 	_, err := d.client.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
 		TransactItems: []types.TransactWriteItem{
-			{
-				Update: &types.Update{
-					TableName: aws.String(d.tableName),
-					Key: map[string]types.AttributeValue{
-						"pk": &types.AttributeValueMemberS{Value: fmt.Sprintf("ACCOUNT#%s", accountID)},
-						"sk": &types.AttributeValueMemberS{Value: fmt.Sprintf("BLOB#%s", blobID)},
-					},
-					UpdateExpression: aws.String(
-						"SET #status = :confirmed, confirmedAt = :now " +
-							"REMOVE gsi1pk, gsi1sk"),
-					ConditionExpression: aws.String("#status = :pending"),
-					ExpressionAttributeNames: map[string]string{
-						"#status": "status",
-					},
-					ExpressionAttributeValues: map[string]types.AttributeValue{
-						":confirmed": &types.AttributeValueMemberS{Value: "confirmed"},
-						":pending":   &types.AttributeValueMemberS{Value: "pending"},
-						":now":       &types.AttributeValueMemberS{Value: now},
-					},
-				},
-			},
-			{
-				Update: &types.Update{
-					TableName: aws.String(d.tableName),
-					Key: map[string]types.AttributeValue{
-						"pk": &types.AttributeValueMemberS{Value: fmt.Sprintf("ACCOUNT#%s", accountID)},
-						"sk": &types.AttributeValueMemberS{Value: "META#"},
-					},
-					UpdateExpression: aws.String(
-						"ADD pendingAllocationsCount :negOne SET updatedAt = :now"),
-					ExpressionAttributeValues: map[string]types.AttributeValue{
-						":negOne": &types.AttributeValueMemberN{Value: "-1"},
-						":now":    &types.AttributeValueMemberS{Value: now},
-					},
-				},
-			},
+			{Update: blobUpdate},
+			{Update: metaUpdate},
 		},
 	})
 

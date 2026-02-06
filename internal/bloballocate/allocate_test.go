@@ -20,15 +20,17 @@ type GenerateURLInput struct {
 	BlobID      string
 	Size        int64
 	ContentType string
+	SizeUnknown bool
 }
 
-func (m *MockStorage) GeneratePresignedPutURL(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpirySecs int64) (string, time.Time, error) {
+func (m *MockStorage) GeneratePresignedPutURL(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpirySecs int64, sizeUnknown bool) (string, time.Time, error) {
 	m.GeneratePresignedURLCalled = true
 	m.GeneratePresignedURLInput = GenerateURLInput{
 		AccountID:   accountID,
 		BlobID:      blobID,
 		Size:        size,
 		ContentType: contentType,
+		SizeUnknown: sizeUnknown,
 	}
 	if m.GeneratePresignedURLErr != nil {
 		return "", time.Time{}, m.GeneratePresignedURLErr
@@ -45,14 +47,15 @@ type MockDB struct {
 }
 
 type AllocateInput struct {
-	AccountID     string
-	BlobID        string
-	Size          int64
-	ContentType   string
-	URLExpiresAt  time.Time
+	AccountID    string
+	BlobID       string
+	Size         int64
+	ContentType  string
+	URLExpiresAt time.Time
+	SizeUnknown  bool
 }
 
-func (m *MockDB) AllocateBlob(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpiresAt time.Time, maxPending int, s3Key string) error {
+func (m *MockDB) AllocateBlob(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpiresAt time.Time, maxPending int, s3Key string, sizeUnknown bool) error {
 	m.AllocateCalled = true
 	m.AllocateInput = AllocateInput{
 		AccountID:    accountID,
@@ -60,6 +63,7 @@ func (m *MockDB) AllocateBlob(ctx context.Context, accountID, blobID string, siz
 		Size:         size,
 		ContentType:  contentType,
 		URLExpiresAt: urlExpiresAt,
+		SizeUnknown:  sizeUnknown,
 	}
 	if m.AllocateErrType != "" {
 		return &AllocationError{Type: m.AllocateErrType, Message: "test error"}
@@ -365,6 +369,135 @@ func TestAllocate_StorageError(t *testing.T) {
 	}
 	if allocErr.Type != "serverFail" {
 		t.Errorf("expected type serverFail, got %s", allocErr.Type)
+	}
+}
+
+func TestAllocate_SizeUnknown_Success(t *testing.T) {
+	mockStorage := &MockStorage{
+		GeneratePresignedURLResult: "https://bucket.s3.amazonaws.com/signed-url",
+	}
+	mockDB := &MockDB{}
+	mockUUID := &MockUUIDGen{GenerateResult: "blob-unknown-size"}
+
+	handler := &Handler{
+		Storage:          mockStorage,
+		DB:               mockDB,
+		UUIDGen:          mockUUID,
+		MaxSizeUploadPut: 250000000,
+		MaxPendingAllocs: 4,
+		URLExpirySecs:    900,
+	}
+
+	req := AllocateRequest{
+		AccountID:   "account-123",
+		Type:        "message/rfc822",
+		Size:        0,
+		SizeUnknown: true,
+	}
+
+	resp, err := handler.Allocate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("expected no error for SizeUnknown=true with size=0, got %v", err)
+	}
+
+	if resp.BlobID != "blob-unknown-size" {
+		t.Errorf("expected blobId blob-unknown-size, got %s", resp.BlobID)
+	}
+	if resp.Size != 0 {
+		t.Errorf("expected size 0, got %d", resp.Size)
+	}
+}
+
+func TestAllocate_SizeUnknown_StillValidatesType(t *testing.T) {
+	handler := &Handler{
+		MaxSizeUploadPut: 250000000,
+		MaxPendingAllocs: 4,
+		URLExpirySecs:    900,
+	}
+
+	req := AllocateRequest{
+		AccountID:   "account-123",
+		Type:        "invalid",
+		Size:        0,
+		SizeUnknown: true,
+	}
+
+	_, err := handler.Allocate(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected error for invalid type even with SizeUnknown=true")
+	}
+
+	allocErr, ok := err.(*AllocationError)
+	if !ok {
+		t.Fatalf("expected AllocationError, got %T", err)
+	}
+	if allocErr.Type != "invalidProperties" {
+		t.Errorf("expected type invalidProperties, got %s", allocErr.Type)
+	}
+}
+
+func TestAllocate_SizeUnknown_PassesFlagToDB(t *testing.T) {
+	mockStorage := &MockStorage{
+		GeneratePresignedURLResult: "https://bucket.s3.amazonaws.com/signed-url",
+	}
+	mockDB := &MockDB{}
+	mockUUID := &MockUUIDGen{GenerateResult: "blob-flag-test"}
+
+	handler := &Handler{
+		Storage:          mockStorage,
+		DB:               mockDB,
+		UUIDGen:          mockUUID,
+		MaxSizeUploadPut: 250000000,
+		MaxPendingAllocs: 4,
+		URLExpirySecs:    900,
+	}
+
+	req := AllocateRequest{
+		AccountID:   "account-123",
+		Type:        "application/octet-stream",
+		Size:        0,
+		SizeUnknown: true,
+	}
+
+	_, err := handler.Allocate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if !mockDB.AllocateInput.SizeUnknown {
+		t.Error("expected SizeUnknown=true to be passed to DB.AllocateBlob")
+	}
+	if !mockStorage.GeneratePresignedURLInput.SizeUnknown {
+		t.Error("expected SizeUnknown=true to be passed to Storage.GeneratePresignedPutURL")
+	}
+}
+
+func TestAllocate_SizeUnknown_CognitoStillRequiresSize(t *testing.T) {
+	handler := &Handler{
+		MaxSizeUploadPut: 250000000,
+		MaxPendingAllocs: 4,
+		URLExpirySecs:    900,
+	}
+
+	// SizeUnknown=false (Cognito path) with size=0 should still fail
+	req := AllocateRequest{
+		AccountID:   "account-123",
+		Type:        "application/pdf",
+		Size:        0,
+		SizeUnknown: false,
+	}
+
+	_, err := handler.Allocate(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected error for size=0 with SizeUnknown=false")
+	}
+
+	allocErr, ok := err.(*AllocationError)
+	if !ok {
+		t.Fatalf("expected AllocationError, got %T", err)
+	}
+	if allocErr.Type != "invalidArguments" {
+		t.Errorf("expected type invalidArguments, got %s", allocErr.Type)
 	}
 }
 

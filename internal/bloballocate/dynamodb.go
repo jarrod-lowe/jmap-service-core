@@ -34,7 +34,7 @@ func NewDynamoDBStore(client DynamoDBClient, tableName string) *DynamoDBStore {
 
 // AllocateBlob creates a pending allocation record with a transactional write
 // that also updates the account META# record (pendingAllocationsCount, quotaRemaining)
-func (d *DynamoDBStore) AllocateBlob(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpiresAt time.Time, maxPending int, s3Key string) error {
+func (d *DynamoDBStore) AllocateBlob(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpiresAt time.Time, maxPending int, s3Key string, sizeUnknown bool) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	urlExpiresAtStr := urlExpiresAt.UTC().Format(time.RFC3339)
 
@@ -58,6 +58,9 @@ func (d *DynamoDBStore) AllocateBlob(ctx context.Context, accountID, blobID stri
 		"s3Key":        s3Key,
 		"createdAt":    now,
 	}
+	if sizeUnknown {
+		blobItem["sizeUnknown"] = true
+	}
 
 	blobAV, err := attributevalue.MarshalMap(blobItem)
 	if err != nil {
@@ -70,26 +73,37 @@ func (d *DynamoDBStore) AllocateBlob(ctx context.Context, accountID, blobID stri
 		"sk": &types.AttributeValueMemberS{Value: "META#"},
 	}
 
+	// Build META# update: when size is unknown, only increment pending count (no quota deduction).
+	// Quota will be deducted at confirm time using the actual S3 object size.
+	updateExpr := "ADD pendingAllocationsCount :one SET updatedAt = :now"
+	conditionExpr := "attribute_exists(pk) AND pendingAllocationsCount < :max"
+	exprValues := map[string]types.AttributeValue{
+		":one": &types.AttributeValueMemberN{Value: "1"},
+		":max": &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", maxPending)},
+		":now": &types.AttributeValueMemberS{Value: now},
+	}
+
+	// When size is known, also deduct quota
+	if !sizeUnknown {
+		updateExpr = "ADD pendingAllocationsCount :one, quotaRemaining :negSize SET updatedAt = :now"
+		conditionExpr += " AND quotaRemaining >= :size"
+		exprValues[":negSize"] = &types.AttributeValueMemberN{Value: fmt.Sprintf("-%d", size)}
+		exprValues[":size"] = &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", size)}
+	}
+
+	metaUpdate := &types.Update{
+		TableName:                 aws.String(d.tableName),
+		Key:                       metaKey,
+		UpdateExpression:          aws.String(updateExpr),
+		ConditionExpression:       aws.String(conditionExpr),
+		ExpressionAttributeValues: exprValues,
+	}
+
 	// Transaction: Update META# and Put blob record
 	_, err = d.client.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
 		TransactItems: []types.TransactWriteItem{
 			{
-				Update: &types.Update{
-					TableName: aws.String(d.tableName),
-					Key:       metaKey,
-					UpdateExpression: aws.String(
-						"ADD pendingAllocationsCount :one, quotaRemaining :negSize " +
-							"SET updatedAt = :now"),
-					ConditionExpression: aws.String(
-						"attribute_exists(pk) AND pendingAllocationsCount < :max AND quotaRemaining >= :size"),
-					ExpressionAttributeValues: map[string]types.AttributeValue{
-						":one":     &types.AttributeValueMemberN{Value: "1"},
-						":negSize": &types.AttributeValueMemberN{Value: fmt.Sprintf("-%d", size)},
-						":size":    &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", size)},
-						":max":     &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", maxPending)},
-						":now":     &types.AttributeValueMemberS{Value: now},
-					},
-				},
+				Update: metaUpdate,
 			},
 			{
 				Put: &types.Put{
@@ -112,7 +126,7 @@ func (d *DynamoDBStore) AllocateBlob(ctx context.Context, accountID, blobID stri
 						// META# update condition failed
 						// Could be: account not provisioned, too many pending, or over quota
 						// We need to distinguish these cases
-						return d.diagnoseMetaConditionFailure(ctx, accountID, maxPending, size)
+						return d.diagnoseMetaConditionFailure(ctx, accountID, maxPending, size, sizeUnknown)
 					}
 					// Blob record already exists (unlikely with UUID)
 					return fmt.Errorf("blob record already exists")
@@ -126,7 +140,7 @@ func (d *DynamoDBStore) AllocateBlob(ctx context.Context, accountID, blobID stri
 }
 
 // diagnoseMetaConditionFailure determines why the META# condition failed
-func (d *DynamoDBStore) diagnoseMetaConditionFailure(ctx context.Context, accountID string, maxPending int, size int64) error {
+func (d *DynamoDBStore) diagnoseMetaConditionFailure(ctx context.Context, accountID string, maxPending int, size int64, sizeUnknown bool) error {
 	// Query the META# record to determine which condition failed
 	result, err := d.client.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(d.tableName),
@@ -176,7 +190,7 @@ func (d *DynamoDBStore) diagnoseMetaConditionFailure(ctx context.Context, accoun
 		}
 	}
 
-	if quotaRemaining < size {
+	if !sizeUnknown && quotaRemaining < size {
 		return &AllocationError{
 			Type:    "overQuota",
 			Message: fmt.Sprintf("Insufficient quota remaining (%d bytes needed, %d available)", size, quotaRemaining),

@@ -30,18 +30,22 @@ func NewS3Storage(presignClient S3PresignClient, bucketName string) *S3Storage {
 }
 
 // GeneratePresignedPutURL generates a pre-signed URL for PUT upload with constraints
-func (s *S3Storage) GeneratePresignedPutURL(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpirySecs int64) (string, time.Time, error) {
+func (s *S3Storage) GeneratePresignedPutURL(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpirySecs int64, sizeUnknown bool) (string, time.Time, error) {
 	key := fmt.Sprintf("%s/%s", accountID, blobID)
 
 	// Note: We don't include Tagging here because it would require the client
 	// to send the x-amz-tagging header with the exact same value.
 	// Instead, blob-confirm Lambda applies the Status=confirmed tag after upload.
-	presignReq, err := s.presignClient.PresignPutObject(ctx, &s3.PutObjectInput{
-		Bucket:        aws.String(s.bucketName),
-		Key:           aws.String(key),
-		ContentType:   aws.String(contentType),
-		ContentLength: aws.Int64(size),
-	}, func(opts *s3.PresignOptions) {
+	input := &s3.PutObjectInput{
+		Bucket:      aws.String(s.bucketName),
+		Key:         aws.String(key),
+		ContentType: aws.String(contentType),
+	}
+	if !sizeUnknown {
+		input.ContentLength = aws.Int64(size)
+	}
+
+	presignReq, err := s.presignClient.PresignPutObject(ctx, input, func(opts *s3.PresignOptions) {
 		opts.Expires = time.Duration(urlExpirySecs) * time.Second
 	})
 	if err != nil {

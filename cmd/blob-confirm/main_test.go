@@ -32,41 +32,43 @@ func (m *MockStorage) DeleteObject(ctx context.Context, key string) error {
 
 // MockDB implements ConfirmDB for testing
 type MockDB struct {
-	GetBlobStatusCalled bool
-	GetBlobStatusInput  GetBlobStatusInput
-	GetBlobStatusResult string // "pending", "confirmed", "" (not found)
-	GetBlobStatusErr    error
+	GetBlobInfoCalled bool
+	GetBlobInfoInput  GetBlobInfoInput
+	GetBlobInfoResult *BlobInfo
+	GetBlobInfoErr    error
 
 	ConfirmBlobCalled bool
 	ConfirmBlobInput  ConfirmBlobInput
 	ConfirmBlobErr    error
 }
 
-type GetBlobStatusInput struct {
+type GetBlobInfoInput struct {
 	AccountID string
 	BlobID    string
 }
 
 type ConfirmBlobInput struct {
-	AccountID string
-	BlobID    string
+	AccountID   string
+	BlobID      string
+	ActualSize  int64
+	SizeUnknown bool
 }
 
-func (m *MockDB) GetBlobStatus(ctx context.Context, accountID, blobID string) (string, error) {
-	m.GetBlobStatusCalled = true
-	m.GetBlobStatusInput = GetBlobStatusInput{AccountID: accountID, BlobID: blobID}
-	return m.GetBlobStatusResult, m.GetBlobStatusErr
+func (m *MockDB) GetBlobInfo(ctx context.Context, accountID, blobID string) (*BlobInfo, error) {
+	m.GetBlobInfoCalled = true
+	m.GetBlobInfoInput = GetBlobInfoInput{AccountID: accountID, BlobID: blobID}
+	return m.GetBlobInfoResult, m.GetBlobInfoErr
 }
 
-func (m *MockDB) ConfirmBlob(ctx context.Context, accountID, blobID string) error {
+func (m *MockDB) ConfirmBlob(ctx context.Context, accountID, blobID string, actualSize int64, sizeUnknown bool) error {
 	m.ConfirmBlobCalled = true
-	m.ConfirmBlobInput = ConfirmBlobInput{AccountID: accountID, BlobID: blobID}
+	m.ConfirmBlobInput = ConfirmBlobInput{AccountID: accountID, BlobID: blobID, ActualSize: actualSize, SizeUnknown: sizeUnknown}
 	return m.ConfirmBlobErr
 }
 
 func TestHandler_ConfirmSuccess(t *testing.T) {
 	mockStorage := &MockStorage{}
-	mockDB := &MockDB{GetBlobStatusResult: "pending"}
+	mockDB := &MockDB{GetBlobInfoResult: &BlobInfo{Status: "pending"}}
 
 	deps = &Dependencies{
 		Storage: mockStorage,
@@ -90,14 +92,14 @@ func TestHandler_ConfirmSuccess(t *testing.T) {
 	}
 
 	// Verify DB GetBlobStatus was called
-	if !mockDB.GetBlobStatusCalled {
-		t.Error("expected GetBlobStatus to be called")
+	if !mockDB.GetBlobInfoCalled {
+		t.Error("expected GetBlobInfo to be called")
 	}
-	if mockDB.GetBlobStatusInput.AccountID != "account-123" {
-		t.Errorf("expected accountID account-123, got %s", mockDB.GetBlobStatusInput.AccountID)
+	if mockDB.GetBlobInfoInput.AccountID != "account-123" {
+		t.Errorf("expected accountID account-123, got %s", mockDB.GetBlobInfoInput.AccountID)
 	}
-	if mockDB.GetBlobStatusInput.BlobID != "blob-456" {
-		t.Errorf("expected blobID blob-456, got %s", mockDB.GetBlobStatusInput.BlobID)
+	if mockDB.GetBlobInfoInput.BlobID != "blob-456" {
+		t.Errorf("expected blobID blob-456, got %s", mockDB.GetBlobInfoInput.BlobID)
 	}
 
 	// Verify Storage ConfirmTag was called first
@@ -116,7 +118,7 @@ func TestHandler_ConfirmSuccess(t *testing.T) {
 
 func TestHandler_BlobNotFound_Skips(t *testing.T) {
 	mockStorage := &MockStorage{}
-	mockDB := &MockDB{GetBlobStatusResult: ""} // Not found (may be traditional upload)
+	mockDB := &MockDB{GetBlobInfoResult: nil} // Not found (may be traditional upload)
 
 	deps = &Dependencies{
 		Storage: mockStorage,
@@ -158,7 +160,7 @@ func TestHandler_BlobNotFound_Skips(t *testing.T) {
 
 func TestHandler_AlreadyConfirmed_Idempotent(t *testing.T) {
 	mockStorage := &MockStorage{}
-	mockDB := &MockDB{GetBlobStatusResult: "confirmed"}
+	mockDB := &MockDB{GetBlobInfoResult: &BlobInfo{Status: "confirmed"}}
 
 	deps = &Dependencies{
 		Storage: mockStorage,
@@ -192,7 +194,7 @@ func TestHandler_AlreadyConfirmed_Idempotent(t *testing.T) {
 
 func TestHandler_ConfirmTagFails_ReturnsError(t *testing.T) {
 	mockStorage := &MockStorage{ConfirmTagErr: errors.New("S3 error")}
-	mockDB := &MockDB{GetBlobStatusResult: "pending"}
+	mockDB := &MockDB{GetBlobInfoResult: &BlobInfo{Status: "pending"}}
 
 	deps = &Dependencies{
 		Storage: mockStorage,
@@ -224,7 +226,7 @@ func TestHandler_ConfirmTagFails_ReturnsError(t *testing.T) {
 func TestHandler_ConfirmBlobFails_ReturnsError(t *testing.T) {
 	mockStorage := &MockStorage{}
 	mockDB := &MockDB{
-		GetBlobStatusResult: "pending",
+		GetBlobInfoResult: &BlobInfo{Status: "pending"},
 		ConfirmBlobErr:      errors.New("DynamoDB error"),
 	}
 
@@ -273,6 +275,82 @@ func TestHandler_InvalidKeyFormat_ReturnsError(t *testing.T) {
 	err := handler(context.Background(), event)
 	if err == nil {
 		t.Fatal("expected error for invalid key format")
+	}
+}
+
+func TestHandler_SizeUnknown_ConfirmWithDeferredQuota(t *testing.T) {
+	mockStorage := &MockStorage{}
+	mockDB := &MockDB{
+		GetBlobInfoResult: &BlobInfo{Status: "pending", SizeUnknown: true},
+	}
+
+	deps = &Dependencies{
+		Storage: mockStorage,
+		DB:      mockDB,
+	}
+
+	event := events.S3Event{
+		Records: []events.S3EventRecord{
+			{
+				S3: events.S3Entity{
+					Bucket: events.S3Bucket{Name: "test-bucket"},
+					Object: events.S3Object{Key: "account-123/blob-789", Size: 5000},
+				},
+			},
+		},
+	}
+
+	err := handler(context.Background(), event)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	// Verify ConfirmBlob was called with actual size and sizeUnknown flag
+	if !mockDB.ConfirmBlobCalled {
+		t.Fatal("expected ConfirmBlob to be called")
+	}
+	if mockDB.ConfirmBlobInput.ActualSize != 5000 {
+		t.Errorf("expected ActualSize 5000, got %d", mockDB.ConfirmBlobInput.ActualSize)
+	}
+	if !mockDB.ConfirmBlobInput.SizeUnknown {
+		t.Error("expected SizeUnknown=true to be passed to ConfirmBlob")
+	}
+}
+
+func TestHandler_KnownSize_ConfirmWithZeroActualSize(t *testing.T) {
+	mockStorage := &MockStorage{}
+	mockDB := &MockDB{
+		GetBlobInfoResult: &BlobInfo{Status: "pending", SizeUnknown: false},
+	}
+
+	deps = &Dependencies{
+		Storage: mockStorage,
+		DB:      mockDB,
+	}
+
+	event := events.S3Event{
+		Records: []events.S3EventRecord{
+			{
+				S3: events.S3Entity{
+					Bucket: events.S3Bucket{Name: "test-bucket"},
+					Object: events.S3Object{Key: "account-123/blob-456", Size: 1024},
+				},
+			},
+		},
+	}
+
+	err := handler(context.Background(), event)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	// SizeUnknown should be false for normal path
+	if mockDB.ConfirmBlobInput.SizeUnknown {
+		t.Error("expected SizeUnknown=false for normal blob confirm")
+	}
+	// ActualSize should still be passed through
+	if mockDB.ConfirmBlobInput.ActualSize != 1024 {
+		t.Errorf("expected ActualSize 1024, got %d", mockDB.ConfirmBlobInput.ActualSize)
 	}
 }
 

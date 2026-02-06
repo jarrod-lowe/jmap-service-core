@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-lambda-go/events"
+	"github.com/jarrod-lowe/jmap-service-core/internal/bloballocate"
 	"github.com/jarrod-lowe/jmap-service-core/internal/plugin"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace/noop"
@@ -258,7 +260,7 @@ func TestProcessMethodCall_InvalidCallStructure_ReturnsError(t *testing.T) {
 
 	// Call with wrong number of elements
 	call := []any{"method", "not-an-object"}
-	result := processMethodCall(ctx, "user-123", call, 0, "req-123", nil, nil, "", "")
+	result := processMethodCall(ctx, "user-123", call, 0, "req-123", nil, nil, "", "", false)
 
 	if result[0] != "error" {
 		t.Errorf("expected error response, got '%v'", result[0])
@@ -270,7 +272,7 @@ func TestProcessMethodCall_NonStringMethodName_ReturnsError(t *testing.T) {
 	ctx := context.Background()
 
 	call := []any{123, map[string]any{}, "c0"}
-	result := processMethodCall(ctx, "user-123", call, 0, "req-123", nil, nil, "", "")
+	result := processMethodCall(ctx, "user-123", call, 0, "req-123", nil, nil, "", "", false)
 
 	if result[0] != "error" {
 		t.Errorf("expected error response, got '%v'", result[0])
@@ -845,5 +847,186 @@ func TestHandler_CDNURLAndAPIURL_DefaultStage(t *testing.T) {
 
 	if capturedReq.APIURL != "https://abc123.execute-api.us-east-1.amazonaws.com/v1" {
 		t.Errorf("expected APIURL with default stage 'https://abc123.execute-api.us-east-1.amazonaws.com/v1', got %q", capturedReq.APIURL)
+	}
+}
+
+// mockBlobAllocateStorage captures GeneratePresignedPutURL calls
+type mockBlobAllocateStorage struct {
+	lastSizeUnknown bool
+}
+
+func (m *mockBlobAllocateStorage) GeneratePresignedPutURL(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpirySecs int64, sizeUnknown bool) (string, time.Time, error) {
+	m.lastSizeUnknown = sizeUnknown
+	return "https://example.com/upload", time.Now().Add(15 * time.Minute), nil
+}
+
+// mockBlobAllocateDB captures AllocateBlob calls
+type mockBlobAllocateDB struct {
+	lastSizeUnknown bool
+}
+
+func (m *mockBlobAllocateDB) AllocateBlob(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpiresAt time.Time, maxPending int, s3Key string, sizeUnknown bool) error {
+	m.lastSizeUnknown = sizeUnknown
+	return nil
+}
+
+func setupTestDepsWithBlobAllocator(storage bloballocate.Storage, db bloballocate.DB, principals []string) {
+	tp := noop.NewTracerProvider()
+	otel.SetTracerProvider(tp)
+
+	registry := plugin.NewRegistryWithPrincipals(principals)
+	registry.AddCapability("https://jmap.rrod.net/extensions/upload-put")
+
+	deps = &Dependencies{
+		Registry: registry,
+		Invoker:  &mockInvoker{},
+		BlobAllocator: &bloballocate.Handler{
+			Storage:          storage,
+			DB:               db,
+			UUIDGen:          &RealUUIDGenerator{},
+			MaxSizeUploadPut: 250000000,
+			MaxPendingAllocs: 4,
+			URLExpirySecs:    900,
+		},
+		DispatcherPoolSize: DefaultDispatcherPoolSize,
+	}
+}
+
+func TestHandler_BlobAllocate_IAMAuth_SizeZero_SetsSizeUnknown(t *testing.T) {
+	mockStorage := &mockBlobAllocateStorage{}
+	mockDB := &mockBlobAllocateDB{}
+	setupTestDepsWithBlobAllocator(mockStorage, mockDB, []string{"arn:aws:iam::123456789012:role/IngestRole"})
+	ctx := context.Background()
+
+	// IAM auth request with Blob/allocate, size=0
+	request := events.APIGatewayProxyRequest{
+		Path: "/jmap-iam/user-123",
+		Body: `{"using":["https://jmap.rrod.net/extensions/upload-put"],"methodCalls":[["Blob/allocate",{"accountId":"user-123","create":{"c1":{"type":"message/rfc822","size":0}}},"a0"]]}`,
+		PathParameters: map[string]string{
+			"accountId": "user-123",
+		},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "test-request-id",
+			Identity: events.APIGatewayRequestIdentity{
+				UserArn: "arn:aws:iam::123456789012:role/IngestRole",
+			},
+		},
+	}
+
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	if response.StatusCode != 200 {
+		t.Fatalf("expected status code 200, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+
+	// Verify that SizeUnknown was set to true
+	if !mockDB.lastSizeUnknown {
+		t.Error("expected SizeUnknown=true to be passed to DB when IAM auth with size=0")
+	}
+	if !mockStorage.lastSizeUnknown {
+		t.Error("expected SizeUnknown=true to be passed to Storage when IAM auth with size=0")
+	}
+
+	// Verify the response includes created blob
+	var jmapResp JMAPResponse
+	if err := json.Unmarshal([]byte(response.Body), &jmapResp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if len(jmapResp.MethodResponses) != 1 {
+		t.Fatalf("expected 1 method response, got %d", len(jmapResp.MethodResponses))
+	}
+	if jmapResp.MethodResponses[0][0] != "Blob/allocate" {
+		t.Errorf("expected Blob/allocate response, got %v", jmapResp.MethodResponses[0][0])
+	}
+}
+
+func TestHandler_BlobAllocate_IAMAuth_SizePositive_NoSizeUnknown(t *testing.T) {
+	mockStorage := &mockBlobAllocateStorage{}
+	mockDB := &mockBlobAllocateDB{}
+	setupTestDepsWithBlobAllocator(mockStorage, mockDB, []string{"arn:aws:iam::123456789012:role/IngestRole"})
+	ctx := context.Background()
+
+	// IAM auth request with Blob/allocate, size>0
+	request := events.APIGatewayProxyRequest{
+		Path: "/jmap-iam/user-123",
+		Body: `{"using":["https://jmap.rrod.net/extensions/upload-put"],"methodCalls":[["Blob/allocate",{"accountId":"user-123","create":{"c1":{"type":"message/rfc822","size":5000}}},"a0"]]}`,
+		PathParameters: map[string]string{
+			"accountId": "user-123",
+		},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "test-request-id",
+			Identity: events.APIGatewayRequestIdentity{
+				UserArn: "arn:aws:iam::123456789012:role/IngestRole",
+			},
+		},
+	}
+
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	if response.StatusCode != 200 {
+		t.Fatalf("expected status code 200, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+
+	// SizeUnknown should be false when size is provided
+	if mockDB.lastSizeUnknown {
+		t.Error("expected SizeUnknown=false when IAM auth with size>0")
+	}
+}
+
+func TestHandler_BlobAllocate_CognitoAuth_SizeZero_Rejected(t *testing.T) {
+	mockStorage := &mockBlobAllocateStorage{}
+	mockDB := &mockBlobAllocateDB{}
+	setupTestDepsWithBlobAllocator(mockStorage, mockDB, nil)
+	ctx := context.Background()
+
+	// Cognito auth request with Blob/allocate, size=0 — should be rejected
+	request := events.APIGatewayProxyRequest{
+		Path: "/jmap",
+		Body: `{"using":["https://jmap.rrod.net/extensions/upload-put"],"methodCalls":[["Blob/allocate",{"accountId":"user-123","create":{"c1":{"type":"message/rfc822","size":0}}},"a0"]]}`,
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "test-request-id",
+			Authorizer: map[string]any{
+				"claims": map[string]any{
+					"sub": "user-123",
+				},
+			},
+		},
+	}
+
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	if response.StatusCode != 200 {
+		t.Fatalf("expected status code 200, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+
+	var jmapResp JMAPResponse
+	if err := json.Unmarshal([]byte(response.Body), &jmapResp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	// Should have notCreated with invalidArguments for size=0
+	respArgs, ok := jmapResp.MethodResponses[0][1].(map[string]any)
+	if !ok {
+		t.Fatal("expected response args to be a map")
+	}
+	notCreated, ok := respArgs["notCreated"].(map[string]any)
+	if !ok || notCreated == nil {
+		t.Fatal("expected notCreated to be set for Cognito + size=0")
+	}
+	c1Err, ok := notCreated["c1"].(map[string]any)
+	if !ok {
+		t.Fatal("expected c1 error in notCreated")
+	}
+	if c1Err["type"] != "invalidArguments" {
+		t.Errorf("expected invalidArguments error, got %v", c1Err["type"])
 	}
 }

@@ -136,6 +136,12 @@ func (r *Registry) AddMethod(method string, target MethodTarget) {
 	r.methodMap[method] = target
 }
 
+// AddCapability registers a capability URN.
+// This is primarily for testing.
+func (r *Registry) AddCapability(capability string) {
+	r.capabilitySet[capability] = true
+}
+
 // AggregatedEventTarget represents a plugin's subscription to an event
 type AggregatedEventTarget struct {
 	PluginID   string

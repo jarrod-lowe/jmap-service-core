@@ -9,9 +9,10 @@ import (
 
 // AllocateRequest is the Blob/allocate method request
 type AllocateRequest struct {
-	AccountID string `json:"accountId"`
-	Type      string `json:"type"` // MIME type
-	Size      int64  `json:"size"` // Size in bytes
+	AccountID   string `json:"accountId"`
+	Type        string `json:"type"`        // MIME type
+	Size        int64  `json:"size"`        // Size in bytes
+	SizeUnknown bool   `json:"sizeUnknown"` // True when size is not declared (IAM path)
 }
 
 // AllocateResponse is the Blob/allocate method response
@@ -37,12 +38,12 @@ func (e *AllocationError) Error() string {
 
 // Storage handles S3 operations for blob allocation
 type Storage interface {
-	GeneratePresignedPutURL(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpirySecs int64) (string, time.Time, error)
+	GeneratePresignedPutURL(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpirySecs int64, sizeUnknown bool) (string, time.Time, error)
 }
 
 // DB handles DynamoDB operations for blob allocation
 type DB interface {
-	AllocateBlob(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpiresAt time.Time, maxPending int, s3Key string) error
+	AllocateBlob(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpiresAt time.Time, maxPending int, s3Key string, sizeUnknown bool) error
 }
 
 // UUIDGenerator generates unique IDs
@@ -62,14 +63,16 @@ type Handler struct {
 
 // Allocate processes a Blob/allocate request
 func (h *Handler) Allocate(ctx context.Context, req AllocateRequest) (*AllocateResponse, error) {
-	// Validate size
-	if req.Size <= 0 {
-		return nil, &AllocationError{Type: "invalidArguments", Message: "size must be greater than 0"}
-	}
-	if req.Size > h.MaxSizeUploadPut {
-		return nil, &AllocationError{
-			Type:    "tooLarge",
-			Message: fmt.Sprintf("size %d exceeds maximum %d bytes", req.Size, h.MaxSizeUploadPut),
+	// Validate size (skip when size is unknown, e.g. IAM path)
+	if !req.SizeUnknown {
+		if req.Size <= 0 {
+			return nil, &AllocationError{Type: "invalidArguments", Message: "size must be greater than 0"}
+		}
+		if req.Size > h.MaxSizeUploadPut {
+			return nil, &AllocationError{
+				Type:    "tooLarge",
+				Message: fmt.Sprintf("size %d exceeds maximum %d bytes", req.Size, h.MaxSizeUploadPut),
+			}
 		}
 	}
 
@@ -83,13 +86,13 @@ func (h *Handler) Allocate(ctx context.Context, req AllocateRequest) (*AllocateR
 	s3Key := fmt.Sprintf("%s/%s", req.AccountID, blobID)
 
 	// Generate pre-signed URL first (before DB transaction to minimize wasted DB writes)
-	url, urlExpires, err := h.Storage.GeneratePresignedPutURL(ctx, req.AccountID, blobID, req.Size, req.Type, h.URLExpirySecs)
+	url, urlExpires, err := h.Storage.GeneratePresignedPutURL(ctx, req.AccountID, blobID, req.Size, req.Type, h.URLExpirySecs, req.SizeUnknown)
 	if err != nil {
 		return nil, &AllocationError{Type: "serverFail", Message: "failed to generate upload URL"}
 	}
 
 	// Create allocation record with transaction (checks quota and pending limits)
-	if err := h.DB.AllocateBlob(ctx, req.AccountID, blobID, req.Size, req.Type, urlExpires, h.MaxPendingAllocs, s3Key); err != nil {
+	if err := h.DB.AllocateBlob(ctx, req.AccountID, blobID, req.Size, req.Type, urlExpires, h.MaxPendingAllocs, s3Key, req.SizeUnknown); err != nil {
 		// Check if it's an AllocationError (tooManyPending, overQuota, etc.)
 		if allocErr, ok := err.(*AllocationError); ok {
 			return nil, allocErr

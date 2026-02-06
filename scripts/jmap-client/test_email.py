@@ -4,6 +4,7 @@ Email-specific JMAP tests.
 Tests for Email/import and Email/get methods per RFC 8621.
 """
 
+import base64
 import uuid
 from datetime import datetime, timezone, timedelta
 
@@ -665,3 +666,288 @@ Some text content with invalid charset declaration.
         # value should still contain best-effort decoded content
         value = body_value.get("value", "")
         assert value, "value should contain best-effort decoded content"
+
+
+class TestEmailWithAttachment:
+    """Tests for Email/import with base64-encoded attachment (separate blob upload)."""
+
+    # Known test content for the "PDF" attachment
+    ATTACHMENT_CONTENT = b"This is fake PDF content for testing base64 attachment handling."
+    TEXT_BODY = "This is the plain text body for attachment testing."
+
+    @pytest.fixture(scope="class")
+    def attachment_email_data(self, jmap_client, api_url, upload_url, token, account_id):
+        """Import a multipart/mixed email with a base64-encoded attachment."""
+        mailbox_id = create_test_mailbox(api_url, token, account_id)
+        assert mailbox_id, "Failed to create test mailbox"
+
+        unique_id = str(uuid.uuid4())
+        message_id = f"<attachment-test-{unique_id}@jmap-test.example>"
+        date_str = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S %z")
+
+        attachment_b64 = base64.b64encode(self.ATTACHMENT_CONTENT).decode("ascii")
+
+        email_content = f"""From: Attachment Test <sender@example.com>
+To: Test Recipient <recipient@example.com>
+Subject: Attachment Test Email
+Date: {date_str}
+Message-ID: {message_id}
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mixed-boundary-{unique_id[:8]}"
+
+--mixed-boundary-{unique_id[:8]}
+Content-Type: text/plain; charset=utf-8
+
+{self.TEXT_BODY}
+--mixed-boundary-{unique_id[:8]}
+Content-Type: application/pdf; name="test.pdf"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="test.pdf"
+
+{attachment_b64}
+--mixed-boundary-{unique_id[:8]}--
+""".replace("\n", "\r\n")
+
+        blob_id = upload_email_blob(upload_url, token, account_id, email_content)
+        assert blob_id, "Failed to upload attachment email blob"
+
+        import_call = [
+            "Email/import",
+            {
+                "accountId": account_id,
+                "emails": {
+                    "email1": {
+                        "blobId": blob_id,
+                        "mailboxIds": {mailbox_id: True},
+                        "receivedAt": datetime.now(timezone.utc).strftime(
+                            "%Y-%m-%dT%H:%M:%SZ"
+                        ),
+                    }
+                },
+            },
+            "importAttachment",
+        ]
+
+        import_response = make_jmap_request(api_url, token, [import_call])
+        assert "methodResponses" in import_response, (
+            f"No methodResponses: {import_response}"
+        )
+
+        response_name, response_data, _ = import_response["methodResponses"][0]
+        assert response_name != "error", (
+            f"JMAP error: {response_data.get('type')}: {response_data.get('description')}"
+        )
+        assert response_name == "Email/import", (
+            f"Unexpected method: {response_name}"
+        )
+
+        created = response_data.get("created", {})
+        if "email1" not in created:
+            not_created = response_data.get("notCreated", {})
+            if "email1" in not_created:
+                error = not_created["email1"]
+                pytest.fail(
+                    f"Not created: {error.get('type')}: {error.get('description')}"
+                )
+            else:
+                pytest.fail(f"No email1 in created or notCreated: {response_data}")
+
+        email_id = created["email1"].get("id")
+        assert email_id, f"No id in created email: {created['email1']}"
+
+        data = {
+            "email_id": email_id,
+            "mailbox_id": mailbox_id,
+            "account_id": account_id,
+        }
+
+        yield data
+
+        # Cleanup
+        destroy_emails_and_verify_cleanup(api_url, token, account_id, [email_id])
+        result = destroy_mailbox(
+            api_url, token, account_id, mailbox_id, on_destroy_remove_emails=True
+        )
+        assert result.get("methodName") == "Mailbox/set", f"Unexpected: {result}"
+        assert mailbox_id in result.get("destroyed", []), (
+            f"Mailbox not destroyed: {result}"
+        )
+
+    def _get_email(self, attachment_email_data, api_url, token, account_id, properties,
+                   fetch_text_body_values=False):
+        """Helper to call Email/get with given properties."""
+        email_id = attachment_email_data["email_id"]
+        args = {
+            "accountId": account_id,
+            "ids": [email_id],
+            "properties": properties,
+        }
+        if fetch_text_body_values:
+            args["fetchTextBodyValues"] = True
+
+        email_get_call = ["Email/get", args, "getAttachmentEmail"]
+        response = make_jmap_request(api_url, token, [email_get_call])
+        assert "methodResponses" in response, f"No methodResponses: {response}"
+
+        resp_name, resp_data, _ = response["methodResponses"][0]
+        assert resp_name == "Email/get", f"Unexpected method: {resp_name}"
+
+        emails = resp_data.get("list", [])
+        assert len(emails) == 1, f"Expected 1 email, got {len(emails)}"
+        return emails[0]
+
+    def test_has_attachment(self, attachment_email_data, api_url, token, account_id):
+        """Email with base64 attachment should have hasAttachment=true."""
+        email = self._get_email(
+            attachment_email_data, api_url, token, account_id,
+            ["id", "hasAttachment"],
+        )
+        assert email.get("hasAttachment") is True, (
+            f"hasAttachment should be True: {email}"
+        )
+
+    def test_body_structure_multipart_mixed(
+        self, attachment_email_data, api_url, token, account_id
+    ):
+        """bodyStructure should show multipart/mixed with text/plain + application/pdf subparts."""
+        email = self._get_email(
+            attachment_email_data, api_url, token, account_id,
+            ["id", "bodyStructure"],
+        )
+
+        body_structure = email.get("bodyStructure")
+        assert body_structure, f"bodyStructure missing: {email}"
+
+        assert body_structure.get("type") == "multipart/mixed", (
+            f"Expected multipart/mixed, got: {body_structure.get('type')}"
+        )
+
+        sub_parts = body_structure.get("subParts", [])
+        assert len(sub_parts) == 2, (
+            f"Expected 2 subParts, got {len(sub_parts)}: {sub_parts}"
+        )
+
+        # First subpart: text/plain
+        assert sub_parts[0].get("type") == "text/plain", (
+            f"Expected text/plain, got: {sub_parts[0].get('type')}"
+        )
+
+        # Second subpart: application/pdf with attachment disposition
+        assert sub_parts[1].get("type") == "application/pdf", (
+            f"Expected application/pdf, got: {sub_parts[1].get('type')}"
+        )
+        assert sub_parts[1].get("disposition") == "attachment", (
+            f"Expected disposition=attachment, got: {sub_parts[1].get('disposition')}"
+        )
+        assert sub_parts[1].get("name") == "test.pdf", (
+            f"Expected name=test.pdf, got: {sub_parts[1].get('name')}"
+        )
+
+    def test_attachment_has_separate_blob(
+        self, attachment_email_data, api_url, token, account_id
+    ):
+        """Base64-decoded attachment should have its own standalone blobId (not a byte-range composite)."""
+        email = self._get_email(
+            attachment_email_data, api_url, token, account_id,
+            ["id", "bodyStructure"],
+        )
+
+        sub_parts = email["bodyStructure"]["subParts"]
+        attachment_part = sub_parts[1]
+        blob_id = attachment_part.get("blobId")
+
+        assert blob_id, f"Attachment has no blobId: {attachment_part}"
+        assert "," not in blob_id, (
+            f"blobId contains comma (byte-range composite), expected standalone blob: {blob_id}"
+        )
+
+    def test_attachment_blob_downloadable(
+        self, attachment_email_data, jmap_client, api_url, token, account_id
+    ):
+        """Attachment blob should be downloadable and contain decoded (not base64) content."""
+        email = self._get_email(
+            attachment_email_data, api_url, token, account_id,
+            ["id", "bodyStructure"],
+        )
+
+        sub_parts = email["bodyStructure"]["subParts"]
+        blob_id = sub_parts[1]["blobId"]
+
+        download_url = jmap_client.jmap_session.download_url
+        url = download_url.replace("{accountId}", account_id).replace("{blobId}", blob_id)
+
+        # Step 1: Get redirect to signed URL
+        response = requests.get(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            allow_redirects=False,
+            timeout=30,
+        )
+        assert response.status_code == 302, (
+            f"Expected 302 redirect, got {response.status_code}: {response.text}"
+        )
+
+        location = response.headers.get("Location")
+        assert location, "No Location header in redirect"
+
+        # Step 2: Follow signed URL to get content
+        content_response = requests.get(location, timeout=30)
+        assert content_response.status_code == 200, (
+            f"Expected 200, got {content_response.status_code}: {content_response.text[:200]}"
+        )
+
+        assert content_response.content == self.ATTACHMENT_CONTENT, (
+            f"Downloaded content mismatch. Expected {len(self.ATTACHMENT_CONTENT)} bytes, "
+            f"got {len(content_response.content)} bytes. "
+            f"Content: {content_response.content[:100]!r}"
+        )
+
+    def test_text_body_values(
+        self, attachment_email_data, api_url, token, account_id
+    ):
+        """Plain text body should be accessible via fetchTextBodyValues."""
+        email = self._get_email(
+            attachment_email_data, api_url, token, account_id,
+            ["id", "bodyValues", "textBody"],
+            fetch_text_body_values=True,
+        )
+
+        body_values = email.get("bodyValues", {})
+        assert body_values, "bodyValues is empty or missing"
+
+        text_body = email.get("textBody", [])
+        assert text_body, "textBody is empty or missing"
+        text_part_id = text_body[0].get("partId")
+        assert text_part_id, "No partId in textBody"
+
+        assert text_part_id in body_values, (
+            f"partId {text_part_id} not in bodyValues: {list(body_values.keys())}"
+        )
+
+        body_value = body_values[text_part_id]
+        assert "value" in body_value, f"No 'value' in bodyValue: {body_value}"
+        assert self.TEXT_BODY in body_value["value"], (
+            f"Expected text body content not found: {body_value['value']}"
+        )
+
+    def test_attachments_array(
+        self, attachment_email_data, api_url, token, account_id
+    ):
+        """The attachments property should contain the PDF attachment."""
+        email = self._get_email(
+            attachment_email_data, api_url, token, account_id,
+            ["id", "attachments"],
+        )
+
+        attachments = email.get("attachments", [])
+        assert len(attachments) == 1, (
+            f"Expected 1 attachment, got {len(attachments)}: {attachments}"
+        )
+
+        attachment = attachments[0]
+        assert attachment.get("type") == "application/pdf", (
+            f"Expected application/pdf, got: {attachment.get('type')}"
+        )
+        assert attachment.get("name") == "test.pdf", (
+            f"Expected name=test.pdf, got: {attachment.get('name')}"
+        )

@@ -142,6 +142,7 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (Respon
 		UsingCaps: jmapReq.Using,
 		CDNURL:    cdnURL,
 		APIURL:    apiURL,
+		IsIAMAuth: isIAMAuthenticatedRequest(request),
 	}
 
 	cfg := dispatcher.Config{
@@ -219,15 +220,16 @@ type JMAPCallProcessor struct {
 	UsingCaps []string
 	CDNURL    string
 	APIURL    string
+	IsIAMAuth bool
 }
 
 // Process implements dispatcher.CallProcessor
 func (p *JMAPCallProcessor) Process(ctx context.Context, idx int, call []any, depResponses []resultref.MethodResponse) []any {
-	return processMethodCall(ctx, p.AccountID, call, idx, p.RequestID, depResponses, p.UsingCaps, p.CDNURL, p.APIURL)
+	return processMethodCall(ctx, p.AccountID, call, idx, p.RequestID, depResponses, p.UsingCaps, p.CDNURL, p.APIURL, p.IsIAMAuth)
 }
 
 // processMethodCall dispatches a method call to the appropriate plugin
-func processMethodCall(ctx context.Context, accountID string, call []any, index int, requestID string, previousResponses []resultref.MethodResponse, usingCaps []string, cdnURL string, apiURL string) []any {
+func processMethodCall(ctx context.Context, accountID string, call []any, index int, requestID string, previousResponses []resultref.MethodResponse, usingCaps []string, cdnURL string, apiURL string, isIAMAuth bool) []any {
 	// Extract method name and clientID early for span attributes
 	var methodName, clientID string
 	if len(call) >= 1 {
@@ -272,7 +274,7 @@ func processMethodCall(ctx context.Context, accountID string, call []any, index 
 
 	// Handle built-in methods before plugin dispatch
 	if methodName == "Blob/allocate" {
-		return handleBlobAllocate(ctx, accountID, resolvedArgs, clientID, usingCaps)
+		return handleBlobAllocate(ctx, accountID, resolvedArgs, clientID, usingCaps, isIAMAuth)
 	}
 
 	// Look up method target
@@ -320,7 +322,7 @@ func processMethodCall(ctx context.Context, accountID string, call []any, index 
 }
 
 // handleBlobAllocate processes a Blob/allocate method call
-func handleBlobAllocate(ctx context.Context, accountID string, args map[string]any, clientID string, usingCaps []string) []any {
+func handleBlobAllocate(ctx context.Context, accountID string, args map[string]any, clientID string, usingCaps []string, isIAMAuth bool) []any {
 	// Check if Blob/allocate is enabled
 	if deps.BlobAllocator == nil {
 		return []any{"error", jmaperror.UnknownMethod("").ToMap(), clientID}
@@ -365,9 +367,10 @@ func handleBlobAllocate(ctx context.Context, accountID string, args map[string]a
 		size, _ := reqMap["size"].(float64) // JSON numbers come as float64
 
 		req := bloballocate.AllocateRequest{
-			AccountID: accountID,
-			Type:      contentType,
-			Size:      int64(size),
+			AccountID:   accountID,
+			Type:        contentType,
+			Size:        int64(size),
+			SizeUnknown: isIAMAuth && int64(size) == 0,
 		}
 
 		resp, err := deps.BlobAllocator.Allocate(ctx, req)

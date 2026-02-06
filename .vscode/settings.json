@@ -4,6 +4,7 @@
         "attributevalue",
         "authtype",
         "awsconfig",
+        "awsinit",
         "AWSX",
         "contrib",
         "dynamodbav",
@@ -22,13 +23,16 @@
         "otlptracegrpc",
         "plugincontract",
         "pycache",
+        "PYTEST",
         "RCPT",
         "resp",
         "semconv",
         "tfstate",
         "tfvars",
         "tracecontext",
+        "TXTS",
         "userpool",
-        "venv"
+        "venv",
+        "XMLS"
     ]
 }
