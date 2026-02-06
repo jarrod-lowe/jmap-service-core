@@ -18,6 +18,7 @@ import requests
 from typing import Optional
 jmapc.session.Session.__dataclass_fields__['event_source_url'].default = None
 jmapc.session.Session.__dataclass_fields__['event_source_url'].type = Optional[str]
+jmapc.session.Session.__annotations__['event_source_url'] = Optional[str]
 
 
 @dataclass
