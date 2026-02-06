@@ -1,9 +1,76 @@
 """Shared helpers for JMAP e2e tests."""
 
+import json
 import uuid
 from datetime import datetime, timezone
 
+import boto3
+import botocore.auth
+import botocore.awsrequest
+import botocore.credentials
+import botocore.session
 import requests
+
+
+def make_iam_jmap_request(
+    api_gateway_invoke_url: str,
+    account_id: str,
+    method_calls: list,
+    region: str = "ap-southeast-2",
+    using: list[str] | None = None,
+    role_arn: str = "",
+) -> dict:
+    """Make a SigV4-signed JMAP request to the IAM endpoint.
+
+    Uses the caller's AWS credentials (from environment/profile) to sign
+    requests against the API Gateway invoke URL directly. CloudFront strips
+    Authorization headers, so IAM requests must bypass it.
+
+    When role_arn is provided, assumes that role first and uses the
+    temporary credentials for signing.
+    """
+    if using is None:
+        using = ["urn:ietf:params:jmap:core"]
+
+    url = f"{api_gateway_invoke_url}/jmap-iam/{account_id}"
+    body = json.dumps({
+        "using": using,
+        "methodCalls": method_calls,
+    })
+
+    # Get credentials — either from assumed role or default chain
+    if role_arn:
+        sts = boto3.client("sts", region_name=region)
+        assumed = sts.assume_role(
+            RoleArn=role_arn,
+            RoleSessionName="jmap-e2e-test",
+        )
+        creds = assumed["Credentials"]
+        credentials = botocore.credentials.Credentials(
+            access_key=creds["AccessKeyId"],
+            secret_key=creds["SecretAccessKey"],
+            token=creds["SessionToken"],
+        )
+    else:
+        session = botocore.session.get_session()
+        credentials = session.get_credentials().get_frozen_credentials()
+
+    # Create and sign the request
+    request = botocore.awsrequest.AWSRequest(
+        method="POST",
+        url=url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    botocore.auth.SigV4Auth(credentials, "execute-api", region).add_auth(request)
+
+    response = requests.post(
+        url,
+        headers=dict(request.headers),
+        data=body,
+        timeout=30,
+    )
+    return response.json()
 
 
 # Expected special mailboxes created by jmap-service-email on account init

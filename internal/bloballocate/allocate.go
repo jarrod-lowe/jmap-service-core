@@ -13,6 +13,7 @@ type AllocateRequest struct {
 	Type        string `json:"type"`        // MIME type
 	Size        int64  `json:"size"`        // Size in bytes
 	SizeUnknown bool   `json:"sizeUnknown"` // True when size is not declared (IAM path)
+	Multipart   bool   `json:"multipart"`   // True for multipart upload (IAM-only)
 }
 
 // AllocateResponse is the Blob/allocate method response
@@ -23,6 +24,7 @@ type AllocateResponse struct {
 	Size       int64     `json:"size"`
 	URL        string    `json:"url"`
 	URLExpires time.Time `json:"urlExpires"`
+	Parts      []PartURL `json:"parts,omitempty"` // Non-nil for multipart uploads
 }
 
 // AllocationError represents a JMAP error from Blob/allocate
@@ -41,9 +43,15 @@ type Storage interface {
 	GeneratePresignedPutURL(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpirySecs int64, sizeUnknown bool) (string, time.Time, error)
 }
 
+// MultipartStorage handles S3 multipart upload operations
+type MultipartStorage interface {
+	CreateMultipartUpload(ctx context.Context, accountID, blobID, contentType string) (string, error)
+	GeneratePresignedPartURLs(ctx context.Context, accountID, blobID, uploadID string, partCount int, urlExpirySecs int64) ([]PartURL, time.Time, error)
+}
+
 // DB handles DynamoDB operations for blob allocation
 type DB interface {
-	AllocateBlob(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpiresAt time.Time, maxPending int, s3Key string, sizeUnknown bool) error
+	AllocateBlob(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpiresAt time.Time, maxPending int, s3Key string, sizeUnknown bool, uploadID string) error
 }
 
 // UUIDGenerator generates unique IDs
@@ -51,18 +59,28 @@ type UUIDGenerator interface {
 	Generate() string
 }
 
+// DefaultMultipartPartCount is the default number of presigned part URLs to generate
+const DefaultMultipartPartCount = 100
+
 // Handler handles Blob/allocate method calls
 type Handler struct {
-	Storage          Storage
-	DB               DB
-	UUIDGen          UUIDGenerator
-	MaxSizeUploadPut int64
-	MaxPendingAllocs int
-	URLExpirySecs    int64
+	Storage             Storage
+	MultipartStorage    MultipartStorage
+	DB                  DB
+	UUIDGen             UUIDGenerator
+	MaxSizeUploadPut    int64
+	MaxPendingAllocs    int
+	URLExpirySecs       int64
+	MultipartPartCount  int
 }
 
 // Allocate processes a Blob/allocate request
 func (h *Handler) Allocate(ctx context.Context, req AllocateRequest) (*AllocateResponse, error) {
+	// Multipart requires SizeUnknown
+	if req.Multipart && !req.SizeUnknown {
+		return nil, &AllocationError{Type: "invalidArguments", Message: "multipart requires unknown size"}
+	}
+
 	// Validate size (skip when size is unknown, e.g. IAM path)
 	if !req.SizeUnknown {
 		if req.Size <= 0 {
@@ -85,19 +103,24 @@ func (h *Handler) Allocate(ctx context.Context, req AllocateRequest) (*AllocateR
 	blobID := h.UUIDGen.Generate()
 	s3Key := fmt.Sprintf("%s/%s", req.AccountID, blobID)
 
-	// Generate pre-signed URL first (before DB transaction to minimize wasted DB writes)
+	if req.Multipart {
+		return h.allocateMultipart(ctx, req, blobID, s3Key)
+	}
+
+	return h.allocateSinglePut(ctx, req, blobID, s3Key)
+}
+
+// allocateSinglePut handles the standard single-PUT upload flow
+func (h *Handler) allocateSinglePut(ctx context.Context, req AllocateRequest, blobID, s3Key string) (*AllocateResponse, error) {
 	url, urlExpires, err := h.Storage.GeneratePresignedPutURL(ctx, req.AccountID, blobID, req.Size, req.Type, h.URLExpirySecs, req.SizeUnknown)
 	if err != nil {
 		return nil, &AllocationError{Type: "serverFail", Message: "failed to generate upload URL"}
 	}
 
-	// Create allocation record with transaction (checks quota and pending limits)
-	if err := h.DB.AllocateBlob(ctx, req.AccountID, blobID, req.Size, req.Type, urlExpires, h.MaxPendingAllocs, s3Key, req.SizeUnknown); err != nil {
-		// Check if it's an AllocationError (tooManyPending, overQuota, etc.)
+	if err := h.DB.AllocateBlob(ctx, req.AccountID, blobID, req.Size, req.Type, urlExpires, h.MaxPendingAllocs, s3Key, req.SizeUnknown, ""); err != nil {
 		if allocErr, ok := err.(*AllocationError); ok {
 			return nil, allocErr
 		}
-		// Log the actual error for debugging
 		return nil, &AllocationError{Type: "serverFail", Message: fmt.Sprintf("failed to create allocation record: %v", err)}
 	}
 
@@ -108,6 +131,43 @@ func (h *Handler) Allocate(ctx context.Context, req AllocateRequest) (*AllocateR
 		Size:       req.Size,
 		URL:        url,
 		URLExpires: urlExpires,
+	}, nil
+}
+
+// allocateMultipart handles the multipart upload flow
+func (h *Handler) allocateMultipart(ctx context.Context, req AllocateRequest, blobID, s3Key string) (*AllocateResponse, error) {
+	// Create multipart upload in S3
+	uploadID, err := h.MultipartStorage.CreateMultipartUpload(ctx, req.AccountID, blobID, req.Type)
+	if err != nil {
+		return nil, &AllocationError{Type: "serverFail", Message: "failed to create multipart upload"}
+	}
+
+	// Generate presigned URLs for parts
+	partCount := h.MultipartPartCount
+	if partCount == 0 {
+		partCount = DefaultMultipartPartCount
+	}
+
+	parts, urlExpires, err := h.MultipartStorage.GeneratePresignedPartURLs(ctx, req.AccountID, blobID, uploadID, partCount, h.URLExpirySecs)
+	if err != nil {
+		return nil, &AllocationError{Type: "serverFail", Message: "failed to generate part upload URLs"}
+	}
+
+	// Store allocation with upload ID
+	if err := h.DB.AllocateBlob(ctx, req.AccountID, blobID, 0, req.Type, urlExpires, h.MaxPendingAllocs, s3Key, true, uploadID); err != nil {
+		if allocErr, ok := err.(*AllocationError); ok {
+			return nil, allocErr
+		}
+		return nil, &AllocationError{Type: "serverFail", Message: fmt.Sprintf("failed to create allocation record: %v", err)}
+	}
+
+	return &AllocateResponse{
+		AccountID:  req.AccountID,
+		BlobID:     blobID,
+		Type:       req.Type,
+		Size:       0,
+		URLExpires: urlExpires,
+		Parts:      parts,
 	}, nil
 }
 

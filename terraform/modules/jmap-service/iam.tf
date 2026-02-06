@@ -161,6 +161,10 @@ data "aws_iam_policy_document" "jmap_api_s3_presign" {
     actions = [
       "s3:PutObject",
       "s3:PutObjectTagging",
+      "s3:CreateMultipartUpload",
+      "s3:UploadPart",
+      "s3:CompleteMultipartUpload",
+      "s3:AbortMultipartUpload",
     ]
     resources = ["${aws_s3_bucket.blobs.arn}/*"]
   }

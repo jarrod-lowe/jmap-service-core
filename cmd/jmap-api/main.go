@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/google/uuid"
 	"github.com/jarrod-lowe/jmap-service-core/internal/bloballocate"
+	"github.com/jarrod-lowe/jmap-service-core/internal/blobcomplete"
 	"github.com/jarrod-lowe/jmap-service-core/internal/db"
 	"github.com/jarrod-lowe/jmap-service-core/internal/dispatcher"
 	"github.com/jarrod-lowe/jmap-service-core/internal/plugin"
@@ -55,6 +56,7 @@ type Dependencies struct {
 	Registry             *plugin.Registry
 	Invoker              plugin.Invoker
 	BlobAllocator        *bloballocate.Handler
+	BlobCompleter        *blobcomplete.Handler
 	DispatcherPoolSize   int
 }
 
@@ -276,6 +278,9 @@ func processMethodCall(ctx context.Context, accountID string, call []any, index 
 	if methodName == "Blob/allocate" {
 		return handleBlobAllocate(ctx, accountID, resolvedArgs, clientID, usingCaps, isIAMAuth)
 	}
+	if methodName == "Blob/complete" {
+		return handleBlobComplete(ctx, accountID, resolvedArgs, clientID, usingCaps)
+	}
 
 	// Look up method target
 	target := deps.Registry.GetMethodTarget(methodName)
@@ -365,12 +370,23 @@ func handleBlobAllocate(ctx context.Context, accountID string, args map[string]a
 
 		contentType, _ := reqMap["type"].(string)
 		size, _ := reqMap["size"].(float64) // JSON numbers come as float64
+		multipart, _ := reqMap["multipart"].(bool)
+
+		// Multipart is IAM-only
+		if multipart && !isIAMAuth {
+			notCreated[creationID] = (&jmaperror.SetError{
+				ErrType:     "invalidArguments",
+				Description: "multipart upload is only available via IAM authentication",
+			}).ToMap()
+			continue
+		}
 
 		req := bloballocate.AllocateRequest{
 			AccountID:   accountID,
 			Type:        contentType,
 			Size:        int64(size),
-			SizeUnknown: isIAMAuth && int64(size) == 0,
+			SizeUnknown: (isIAMAuth && int64(size) == 0) || multipart,
+			Multipart:   multipart,
 		}
 
 		resp, err := deps.BlobAllocator.Allocate(ctx, req)
@@ -389,13 +405,26 @@ func handleBlobAllocate(ctx context.Context, accountID string, args map[string]a
 			continue
 		}
 
-		created[creationID] = map[string]any{
+		createdEntry := map[string]any{
 			"id":      resp.BlobID,
 			"type":    resp.Type,
 			"size":    resp.Size,
-			"url":     resp.URL,
 			"expires": resp.URLExpires.UTC().Format("2006-01-02T15:04:05Z"),
 		}
+		if len(resp.Parts) > 0 {
+			// Multipart response: include parts, no single URL
+			partsOut := make([]map[string]any, len(resp.Parts))
+			for i, p := range resp.Parts {
+				partsOut[i] = map[string]any{
+					"partNumber": p.PartNumber,
+					"url":        p.URL,
+				}
+			}
+			createdEntry["parts"] = partsOut
+		} else {
+			createdEntry["url"] = resp.URL
+		}
+		created[creationID] = createdEntry
 	}
 
 	// Build response per RFC 9404 pattern
@@ -414,6 +443,86 @@ func handleBlobAllocate(ctx context.Context, accountID string, args map[string]a
 	}
 
 	return []any{"Blob/allocate", response, clientID}
+}
+
+// handleBlobComplete processes a Blob/complete method call
+func handleBlobComplete(ctx context.Context, accountID string, args map[string]any, clientID string, usingCaps []string) []any {
+	// Check if Blob/complete is enabled
+	if deps.BlobCompleter == nil {
+		return []any{"error", jmaperror.UnknownMethod("").ToMap(), clientID}
+	}
+
+	// Check that the capability is in the using array
+	hasCapability := false
+	for _, cap := range usingCaps {
+		if cap == UploadPutCapability {
+			hasCapability = true
+			break
+		}
+	}
+	if !hasCapability {
+		return []any{"error", jmaperror.UnknownMethod("Blob/complete requires the " + UploadPutCapability + " capability").ToMap(), clientID}
+	}
+
+	// Validate accountId in args
+	argsAccountID, _ := args["accountId"].(string)
+	if argsAccountID != "" && argsAccountID != accountID {
+		return []any{"error", jmaperror.AccountNotFound("Account ID mismatch").ToMap(), clientID}
+	}
+
+	// Extract blobId
+	blobID, _ := args["id"].(string)
+	if blobID == "" {
+		return []any{"error", jmaperror.InvalidArguments("id is required").ToMap(), clientID}
+	}
+
+	// Extract parts array
+	partsRaw, ok := args["parts"].([]any)
+	if !ok || len(partsRaw) == 0 {
+		return []any{"error", jmaperror.InvalidArguments("parts array is required and must not be empty").ToMap(), clientID}
+	}
+
+	parts := make([]bloballocate.CompletedPart, 0, len(partsRaw))
+	for _, pRaw := range partsRaw {
+		pMap, ok := pRaw.(map[string]any)
+		if !ok {
+			return []any{"error", jmaperror.InvalidArguments("each part must be an object with partNumber and etag").ToMap(), clientID}
+		}
+		partNum, _ := pMap["partNumber"].(float64)
+		etag, _ := pMap["etag"].(string)
+		if partNum <= 0 || etag == "" {
+			return []any{"error", jmaperror.InvalidArguments("each part must have a positive partNumber and non-empty etag").ToMap(), clientID}
+		}
+		parts = append(parts, bloballocate.CompletedPart{
+			PartNumber: int32(partNum),
+			ETag:       etag,
+		})
+	}
+
+	req := blobcomplete.CompleteRequest{
+		AccountID: accountID,
+		BlobID:    blobID,
+		Parts:     parts,
+	}
+
+	resp, err := deps.BlobCompleter.Complete(ctx, req)
+	if err != nil {
+		compErr, ok := err.(*blobcomplete.CompleteError)
+		if ok {
+			return []any{"error", (&jmaperror.MethodError{
+				ErrType:     compErr.Type,
+				Description: compErr.Message,
+			}).ToMap(), clientID}
+		}
+		return []any{"error", jmaperror.ServerFail("Failed to complete multipart upload", err).ToMap(), clientID}
+	}
+
+	response := map[string]any{
+		"accountId": resp.AccountID,
+		"id":        resp.BlobID,
+	}
+
+	return []any{"Blob/complete", response, clientID}
 }
 
 // isIAMAuthenticatedRequest checks if the request is IAM-authenticated
@@ -493,8 +602,11 @@ func main() {
 		// Initialize DynamoDB client for blob allocations
 		ddbClient := dynamodb.NewFromConfig(result.Config)
 
+		s3Storage := bloballocate.NewS3Storage(presignClient, blobBucket, s3Client)
+
 		blobAllocator = &bloballocate.Handler{
-			Storage:          bloballocate.NewS3Storage(presignClient, blobBucket),
+			Storage:          s3Storage,
+			MultipartStorage: s3Storage,
 			DB:               bloballocate.NewDynamoDBStore(ddbClient, tableName),
 			UUIDGen:          &RealUUIDGenerator{},
 			MaxSizeUploadPut: maxSizeUploadPut,
@@ -511,10 +623,23 @@ func main() {
 		}
 	}
 
+	// Initialize Blob/complete handler (reuses same S3 and DynamoDB clients)
+	var blobCompleter *blobcomplete.Handler
+	if blobBucket != "" {
+		s3Client := s3.NewFromConfig(result.Config)
+		ddbClient := dynamodb.NewFromConfig(result.Config)
+		s3Storage := bloballocate.NewS3Storage(s3.NewPresignClient(s3Client), blobBucket, s3Client)
+		blobCompleter = &blobcomplete.Handler{
+			Storage: s3Storage,
+			DB:      blobcomplete.NewDynamoDBStore(ddbClient, tableName),
+		}
+	}
+
 	deps = &Dependencies{
 		Registry:           registry,
 		Invoker:            invoker,
 		BlobAllocator:      blobAllocator,
+		BlobCompleter:      blobCompleter,
 		DispatcherPoolSize: dispatcherPoolSize,
 	}
 

@@ -236,7 +236,7 @@ resource "aws_s3_bucket_notification" "blobs_notification" {
 
   lambda_function {
     lambda_function_arn = aws_lambda_function.blob_confirm.arn
-    events              = ["s3:ObjectCreated:Put"]
+    events              = ["s3:ObjectCreated:Put", "s3:ObjectCreated:CompleteMultipartUpload"]
   }
 
   depends_on = [aws_lambda_permission.blob_confirm_s3]

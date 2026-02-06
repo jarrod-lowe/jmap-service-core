@@ -8,6 +8,7 @@ import (
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/jarrod-lowe/jmap-service-core/internal/bloballocate"
+	"github.com/jarrod-lowe/jmap-service-core/internal/blobcomplete"
 	"github.com/jarrod-lowe/jmap-service-core/internal/plugin"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace/noop"
@@ -865,7 +866,7 @@ type mockBlobAllocateDB struct {
 	lastSizeUnknown bool
 }
 
-func (m *mockBlobAllocateDB) AllocateBlob(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpiresAt time.Time, maxPending int, s3Key string, sizeUnknown bool) error {
+func (m *mockBlobAllocateDB) AllocateBlob(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpiresAt time.Time, maxPending int, s3Key string, sizeUnknown bool, uploadID string) error {
 	m.lastSizeUnknown = sizeUnknown
 	return nil
 }
@@ -1028,5 +1029,260 @@ func TestHandler_BlobAllocate_CognitoAuth_SizeZero_Rejected(t *testing.T) {
 	}
 	if c1Err["type"] != "invalidArguments" {
 		t.Errorf("expected invalidArguments error, got %v", c1Err["type"])
+	}
+}
+
+// mockMultipartStorage implements bloballocate.MultipartStorage for testing
+type mockMultipartStorage struct {
+	createUploadID string
+}
+
+func (m *mockMultipartStorage) CreateMultipartUpload(ctx context.Context, accountID, blobID, contentType string) (string, error) {
+	return m.createUploadID, nil
+}
+
+func (m *mockMultipartStorage) GeneratePresignedPartURLs(ctx context.Context, accountID, blobID, uploadID string, partCount int, urlExpirySecs int64) ([]bloballocate.PartURL, time.Time, error) {
+	parts := make([]bloballocate.PartURL, partCount)
+	for i := 0; i < partCount; i++ {
+		parts[i] = bloballocate.PartURL{PartNumber: int32(i + 1), URL: "https://example.com/part"}
+	}
+	return parts, time.Now().Add(15 * time.Minute), nil
+}
+
+// mockBlobCompleteStorage implements blobcomplete.Storage for testing
+type mockBlobCompleteStorage struct{}
+
+func (m *mockBlobCompleteStorage) CompleteMultipartUpload(ctx context.Context, accountID, blobID, uploadID string, parts []bloballocate.CompletedPart) error {
+	return nil
+}
+
+// mockBlobCompleteDB implements blobcomplete.DB for testing
+type mockBlobCompleteDB struct {
+	record *blobcomplete.BlobRecord
+}
+
+func (m *mockBlobCompleteDB) GetBlobForComplete(ctx context.Context, accountID, blobID string) (*blobcomplete.BlobRecord, error) {
+	return m.record, nil
+}
+
+func setupTestDepsWithMultipart(principals []string) {
+	tp := noop.NewTracerProvider()
+	otel.SetTracerProvider(tp)
+
+	registry := plugin.NewRegistryWithPrincipals(principals)
+	registry.AddCapability("https://jmap.rrod.net/extensions/upload-put")
+
+	deps = &Dependencies{
+		Registry: registry,
+		Invoker:  &mockInvoker{},
+		BlobAllocator: &bloballocate.Handler{
+			Storage:            &mockBlobAllocateStorage{},
+			MultipartStorage:   &mockMultipartStorage{createUploadID: "upload-test"},
+			DB:                 &mockBlobAllocateDB{},
+			UUIDGen:            &RealUUIDGenerator{},
+			MaxSizeUploadPut:   250000000,
+			MaxPendingAllocs:   4,
+			URLExpirySecs:      900,
+			MultipartPartCount: 3,
+		},
+		BlobCompleter: &blobcomplete.Handler{
+			Storage: &mockBlobCompleteStorage{},
+			DB: &mockBlobCompleteDB{
+				record: &blobcomplete.BlobRecord{
+					Status:    "pending",
+					Multipart: true,
+					UploadID:  "upload-test",
+				},
+			},
+		},
+		DispatcherPoolSize: DefaultDispatcherPoolSize,
+	}
+}
+
+func TestHandler_BlobAllocate_Multipart_IAM_ReturnsPartsNotURL(t *testing.T) {
+	setupTestDepsWithMultipart([]string{"arn:aws:iam::123456789012:role/IngestRole"})
+	ctx := context.Background()
+
+	request := events.APIGatewayProxyRequest{
+		Path: "/jmap-iam/user-123",
+		Body: `{"using":["https://jmap.rrod.net/extensions/upload-put"],"methodCalls":[["Blob/allocate",{"accountId":"user-123","create":{"c1":{"type":"message/rfc822","multipart":true}}},"a0"]]}`,
+		PathParameters: map[string]string{
+			"accountId": "user-123",
+		},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "test-request-id",
+			Identity: events.APIGatewayRequestIdentity{
+				UserArn: "arn:aws:iam::123456789012:role/IngestRole",
+			},
+		},
+	}
+
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if response.StatusCode != 200 {
+		t.Fatalf("expected status code 200, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+
+	var jmapResp JMAPResponse
+	if err := json.Unmarshal([]byte(response.Body), &jmapResp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if jmapResp.MethodResponses[0][0] != "Blob/allocate" {
+		t.Fatalf("expected Blob/allocate, got %v", jmapResp.MethodResponses[0][0])
+	}
+
+	respArgs := jmapResp.MethodResponses[0][1].(map[string]any)
+	created := respArgs["created"].(map[string]any)
+	c1 := created["c1"].(map[string]any)
+
+	// Should have parts, not url
+	parts, hasParts := c1["parts"]
+	_, hasURL := c1["url"]
+	if !hasParts {
+		t.Fatal("expected 'parts' in multipart response")
+	}
+	if hasURL {
+		t.Error("expected no 'url' in multipart response")
+	}
+
+	partsArr, ok := parts.([]any)
+	if !ok {
+		t.Fatalf("expected parts to be array, got %T", parts)
+	}
+	if len(partsArr) != 3 {
+		t.Errorf("expected 3 parts, got %d", len(partsArr))
+	}
+}
+
+func TestHandler_BlobAllocate_Multipart_Cognito_Rejected(t *testing.T) {
+	setupTestDepsWithMultipart(nil)
+	ctx := context.Background()
+
+	// Cognito auth request with multipart=true — should be rejected
+	request := events.APIGatewayProxyRequest{
+		Path: "/jmap",
+		Body: `{"using":["https://jmap.rrod.net/extensions/upload-put"],"methodCalls":[["Blob/allocate",{"accountId":"user-123","create":{"c1":{"type":"message/rfc822","multipart":true}}},"a0"]]}`,
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "test-request-id",
+			Authorizer: map[string]any{
+				"claims": map[string]any{
+					"sub": "user-123",
+				},
+			},
+		},
+	}
+
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if response.StatusCode != 200 {
+		t.Fatalf("expected status code 200, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+
+	var jmapResp JMAPResponse
+	if err := json.Unmarshal([]byte(response.Body), &jmapResp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	respArgs := jmapResp.MethodResponses[0][1].(map[string]any)
+	notCreated, ok := respArgs["notCreated"].(map[string]any)
+	if !ok || notCreated == nil {
+		t.Fatal("expected notCreated for Cognito multipart request")
+	}
+	c1Err := notCreated["c1"].(map[string]any)
+	if c1Err["type"] != "invalidArguments" {
+		t.Errorf("expected invalidArguments, got %v", c1Err["type"])
+	}
+}
+
+func TestHandler_BlobComplete_Success(t *testing.T) {
+	setupTestDepsWithMultipart([]string{"arn:aws:iam::123456789012:role/IngestRole"})
+	ctx := context.Background()
+
+	request := events.APIGatewayProxyRequest{
+		Path: "/jmap-iam/user-123",
+		Body: `{"using":["https://jmap.rrod.net/extensions/upload-put"],"methodCalls":[["Blob/complete",{"accountId":"user-123","id":"blob-1","parts":[{"partNumber":1,"etag":"\"abc\""},{"partNumber":2,"etag":"\"def\""}]},"c0"]]}`,
+		PathParameters: map[string]string{
+			"accountId": "user-123",
+		},
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "test-request-id",
+			Identity: events.APIGatewayRequestIdentity{
+				UserArn: "arn:aws:iam::123456789012:role/IngestRole",
+			},
+		},
+	}
+
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if response.StatusCode != 200 {
+		t.Fatalf("expected status code 200, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+
+	var jmapResp JMAPResponse
+	if err := json.Unmarshal([]byte(response.Body), &jmapResp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if len(jmapResp.MethodResponses) != 1 {
+		t.Fatalf("expected 1 method response, got %d", len(jmapResp.MethodResponses))
+	}
+	if jmapResp.MethodResponses[0][0] != "Blob/complete" {
+		t.Errorf("expected Blob/complete response, got %v", jmapResp.MethodResponses[0][0])
+	}
+
+	respArgs := jmapResp.MethodResponses[0][1].(map[string]any)
+	if respArgs["accountId"] != "user-123" {
+		t.Errorf("expected accountId 'user-123', got %v", respArgs["accountId"])
+	}
+	if respArgs["id"] != "blob-1" {
+		t.Errorf("expected id 'blob-1', got %v", respArgs["id"])
+	}
+}
+
+func TestHandler_BlobComplete_MissingCapability(t *testing.T) {
+	// Use setupTestDeps which has no upload-put capability
+	setupTestDeps()
+	deps.BlobCompleter = &blobcomplete.Handler{
+		Storage: &mockBlobCompleteStorage{},
+		DB:      &mockBlobCompleteDB{},
+	}
+	ctx := context.Background()
+
+	request := events.APIGatewayProxyRequest{
+		Body: `{"using":[],"methodCalls":[["Blob/complete",{"accountId":"user-123","id":"blob-1","parts":[{"partNumber":1,"etag":"e1"}]},"c0"]]}`,
+		RequestContext: events.APIGatewayProxyRequestContext{
+			RequestID: "test-request-id",
+			Authorizer: map[string]any{
+				"claims": map[string]any{
+					"sub": "user-123",
+				},
+			},
+		},
+	}
+
+	response, err := handler(ctx, request)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if response.StatusCode != 200 {
+		t.Fatalf("expected status code 200, got %d. Body: %s", response.StatusCode, response.Body)
+	}
+
+	var jmapResp JMAPResponse
+	json.Unmarshal([]byte(response.Body), &jmapResp)
+
+	if jmapResp.MethodResponses[0][0] != "error" {
+		t.Errorf("expected error response, got %v", jmapResp.MethodResponses[0][0])
+	}
+	errArgs := jmapResp.MethodResponses[0][1].(map[string]any)
+	if errArgs["type"] != "unknownMethod" {
+		t.Errorf("expected unknownMethod error, got %v", errArgs["type"])
 	}
 }

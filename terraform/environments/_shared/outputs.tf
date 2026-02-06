@@ -129,3 +129,9 @@ output "resource_group_url" {
   description = "URL to view the Resource Group in AWS Console"
   value       = module.jmap_service.resource_group_url
 }
+
+# E2E test client
+output "e2e_test_role_arn" {
+  description = "ARN of the IAM role for e2e test client"
+  value       = module.jmap_service.e2e_test_role_arn
+}

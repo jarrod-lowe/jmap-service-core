@@ -90,6 +90,8 @@ load_config() {
     JMAP_HOST=$(tf_output "jmap_host")
     BLOB_BUCKET=$(tf_output "blob_bucket_name")
     DYNAMODB_TABLE=$(tf_output "dynamodb_table_name")
+    API_GATEWAY_INVOKE_URL=$(tf_output "api_gateway_invoke_url")
+    E2E_TEST_ROLE_ARN=$(tf_output "e2e_test_role_arn")
 
     # Email plugin table (may not exist)
     DYNAMODB_EMAIL_TABLE="${DYNAMODB_TABLE/core/email}" || ""
@@ -119,6 +121,8 @@ run_python_test() {
     export BLOB_BUCKET="$BLOB_BUCKET"
     export DYNAMODB_TABLE="$DYNAMODB_TABLE"
     export DYNAMODB_EMAIL_TABLE="$DYNAMODB_EMAIL_TABLE"
+    export API_GATEWAY_INVOKE_URL="$API_GATEWAY_INVOKE_URL"
+    export E2E_TEST_ROLE_ARN="$E2E_TEST_ROLE_ARN"
     export AWS_REGION="$REGION"
     export COGNITO_USER_POOL_ID="$USER_POOL_ID"
     export COGNITO_CLIENT_ID="$CLIENT_ID"

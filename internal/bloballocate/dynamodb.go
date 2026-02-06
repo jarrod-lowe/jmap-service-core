@@ -33,8 +33,9 @@ func NewDynamoDBStore(client DynamoDBClient, tableName string) *DynamoDBStore {
 }
 
 // AllocateBlob creates a pending allocation record with a transactional write
-// that also updates the account META# record (pendingAllocationsCount, quotaRemaining)
-func (d *DynamoDBStore) AllocateBlob(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpiresAt time.Time, maxPending int, s3Key string, sizeUnknown bool) error {
+// that also updates the account META# record (pendingAllocationsCount, quotaRemaining).
+// When uploadID is non-empty, stores it on the blob record for multipart upload tracking.
+func (d *DynamoDBStore) AllocateBlob(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpiresAt time.Time, maxPending int, s3Key string, sizeUnknown bool, uploadID string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	urlExpiresAtStr := urlExpiresAt.UTC().Format(time.RFC3339)
 
@@ -60,6 +61,10 @@ func (d *DynamoDBStore) AllocateBlob(ctx context.Context, accountID, blobID stri
 	}
 	if sizeUnknown {
 		blobItem["sizeUnknown"] = true
+	}
+	if uploadID != "" {
+		blobItem["uploadId"] = uploadID
+		blobItem["multipart"] = true
 	}
 
 	blobAV, err := attributevalue.MarshalMap(blobItem)

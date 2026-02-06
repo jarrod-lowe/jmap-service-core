@@ -53,9 +53,10 @@ type AllocateInput struct {
 	ContentType  string
 	URLExpiresAt time.Time
 	SizeUnknown  bool
+	UploadID     string
 }
 
-func (m *MockDB) AllocateBlob(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpiresAt time.Time, maxPending int, s3Key string, sizeUnknown bool) error {
+func (m *MockDB) AllocateBlob(ctx context.Context, accountID, blobID string, size int64, contentType string, urlExpiresAt time.Time, maxPending int, s3Key string, sizeUnknown bool, uploadID string) error {
 	m.AllocateCalled = true
 	m.AllocateInput = AllocateInput{
 		AccountID:    accountID,
@@ -64,6 +65,7 @@ func (m *MockDB) AllocateBlob(ctx context.Context, accountID, blobID string, siz
 		ContentType:  contentType,
 		URLExpiresAt: urlExpiresAt,
 		SizeUnknown:  sizeUnknown,
+		UploadID:     uploadID,
 	}
 	if m.AllocateErrType != "" {
 		return &AllocationError{Type: m.AllocateErrType, Message: "test error"}
@@ -498,6 +500,243 @@ func TestAllocate_SizeUnknown_CognitoStillRequiresSize(t *testing.T) {
 	}
 	if allocErr.Type != "invalidArguments" {
 		t.Errorf("expected type invalidArguments, got %s", allocErr.Type)
+	}
+}
+
+// MockMultipartStorage implements MultipartStorage for testing
+type MockMultipartStorage struct {
+	CreateMultipartUploadCalled bool
+	CreateMultipartUploadID     string
+	CreateMultipartUploadErr    error
+	GeneratePartURLsCalled      bool
+	GeneratePartURLsResult      []PartURL
+	GeneratePartURLsErr         error
+}
+
+func (m *MockMultipartStorage) CreateMultipartUpload(ctx context.Context, accountID, blobID, contentType string) (string, error) {
+	m.CreateMultipartUploadCalled = true
+	if m.CreateMultipartUploadErr != nil {
+		return "", m.CreateMultipartUploadErr
+	}
+	return m.CreateMultipartUploadID, nil
+}
+
+func (m *MockMultipartStorage) GeneratePresignedPartURLs(ctx context.Context, accountID, blobID, uploadID string, partCount int, urlExpirySecs int64) ([]PartURL, time.Time, error) {
+	m.GeneratePartURLsCalled = true
+	if m.GeneratePartURLsErr != nil {
+		return nil, time.Time{}, m.GeneratePartURLsErr
+	}
+	result := m.GeneratePartURLsResult
+	if result == nil {
+		// Generate default parts
+		result = make([]PartURL, partCount)
+		for i := 0; i < partCount; i++ {
+			result[i] = PartURL{PartNumber: int32(i + 1), URL: "https://example.com/part"}
+		}
+	}
+	return result, time.Now().Add(time.Duration(urlExpirySecs) * time.Second), nil
+}
+
+func TestAllocate_Multipart_Success(t *testing.T) {
+	mockStorage := &MockStorage{}
+	mockMultipart := &MockMultipartStorage{
+		CreateMultipartUploadID: "upload-abc",
+	}
+	mockDB := &MockDB{}
+	mockUUID := &MockUUIDGen{GenerateResult: "blob-mp-1"}
+
+	handler := &Handler{
+		Storage:            mockStorage,
+		MultipartStorage:   mockMultipart,
+		DB:                 mockDB,
+		UUIDGen:            mockUUID,
+		MaxSizeUploadPut:   250000000,
+		MaxPendingAllocs:   4,
+		URLExpirySecs:      900,
+		MultipartPartCount: 5,
+	}
+
+	req := AllocateRequest{
+		AccountID:   "account-1",
+		Type:        "message/rfc822",
+		SizeUnknown: true,
+		Multipart:   true,
+	}
+
+	resp, err := handler.Allocate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	// Should return parts, not a single URL
+	if resp.URL != "" {
+		t.Errorf("expected empty URL for multipart, got %q", resp.URL)
+	}
+	if len(resp.Parts) != 5 {
+		t.Fatalf("expected 5 parts, got %d", len(resp.Parts))
+	}
+	if resp.BlobID != "blob-mp-1" {
+		t.Errorf("expected blobId 'blob-mp-1', got %q", resp.BlobID)
+	}
+	if resp.Size != 0 {
+		t.Errorf("expected size 0 for multipart, got %d", resp.Size)
+	}
+
+	// Verify multipart storage was called, not single-PUT storage
+	if !mockMultipart.CreateMultipartUploadCalled {
+		t.Error("expected CreateMultipartUpload to be called")
+	}
+	if !mockMultipart.GeneratePartURLsCalled {
+		t.Error("expected GeneratePresignedPartURLs to be called")
+	}
+	if mockStorage.GeneratePresignedURLCalled {
+		t.Error("expected single-PUT GeneratePresignedPutURL NOT to be called")
+	}
+
+	// Verify DB was called
+	if !mockDB.AllocateCalled {
+		t.Fatal("expected DB.AllocateBlob to be called")
+	}
+}
+
+func TestAllocate_Multipart_RequiresSizeUnknown(t *testing.T) {
+	handler := &Handler{
+		MaxSizeUploadPut: 250000000,
+		MaxPendingAllocs: 4,
+		URLExpirySecs:    900,
+	}
+
+	req := AllocateRequest{
+		AccountID:   "account-1",
+		Type:        "message/rfc822",
+		Size:        1024,
+		SizeUnknown: false,
+		Multipart:   true,
+	}
+
+	_, err := handler.Allocate(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected error for multipart without sizeUnknown")
+	}
+
+	allocErr, ok := err.(*AllocationError)
+	if !ok {
+		t.Fatalf("expected AllocationError, got %T", err)
+	}
+	if allocErr.Type != "invalidArguments" {
+		t.Errorf("expected type invalidArguments, got %s", allocErr.Type)
+	}
+}
+
+func TestAllocate_Multipart_CreateUploadError(t *testing.T) {
+	mockMultipart := &MockMultipartStorage{
+		CreateMultipartUploadErr: errors.New("S3 error"),
+	}
+	mockDB := &MockDB{}
+	mockUUID := &MockUUIDGen{GenerateResult: "blob-err"}
+
+	handler := &Handler{
+		Storage:          &MockStorage{},
+		MultipartStorage: mockMultipart,
+		DB:               mockDB,
+		UUIDGen:          mockUUID,
+		MaxSizeUploadPut: 250000000,
+		MaxPendingAllocs: 4,
+		URLExpirySecs:    900,
+	}
+
+	req := AllocateRequest{
+		AccountID:   "account-1",
+		Type:        "message/rfc822",
+		SizeUnknown: true,
+		Multipart:   true,
+	}
+
+	_, err := handler.Allocate(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected error for create multipart upload failure")
+	}
+
+	allocErr, ok := err.(*AllocationError)
+	if !ok {
+		t.Fatalf("expected AllocationError, got %T", err)
+	}
+	if allocErr.Type != "serverFail" {
+		t.Errorf("expected type serverFail, got %s", allocErr.Type)
+	}
+}
+
+func TestAllocate_Multipart_GeneratePartURLsError(t *testing.T) {
+	mockMultipart := &MockMultipartStorage{
+		CreateMultipartUploadID: "upload-abc",
+		GeneratePartURLsErr:    errors.New("presign error"),
+	}
+	mockDB := &MockDB{}
+	mockUUID := &MockUUIDGen{GenerateResult: "blob-err"}
+
+	handler := &Handler{
+		Storage:          &MockStorage{},
+		MultipartStorage: mockMultipart,
+		DB:               mockDB,
+		UUIDGen:          mockUUID,
+		MaxSizeUploadPut: 250000000,
+		MaxPendingAllocs: 4,
+		URLExpirySecs:    900,
+	}
+
+	req := AllocateRequest{
+		AccountID:   "account-1",
+		Type:        "message/rfc822",
+		SizeUnknown: true,
+		Multipart:   true,
+	}
+
+	_, err := handler.Allocate(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected error for part URL generation failure")
+	}
+
+	allocErr, ok := err.(*AllocationError)
+	if !ok {
+		t.Fatalf("expected AllocationError, got %T", err)
+	}
+	if allocErr.Type != "serverFail" {
+		t.Errorf("expected type serverFail, got %s", allocErr.Type)
+	}
+}
+
+func TestAllocate_Multipart_DefaultPartCount(t *testing.T) {
+	mockMultipart := &MockMultipartStorage{
+		CreateMultipartUploadID: "upload-abc",
+	}
+	mockDB := &MockDB{}
+	mockUUID := &MockUUIDGen{GenerateResult: "blob-default"}
+
+	handler := &Handler{
+		Storage:          &MockStorage{},
+		MultipartStorage: mockMultipart,
+		DB:               mockDB,
+		UUIDGen:          mockUUID,
+		MaxSizeUploadPut: 250000000,
+		MaxPendingAllocs: 4,
+		URLExpirySecs:    900,
+		// MultipartPartCount not set — should use default
+	}
+
+	req := AllocateRequest{
+		AccountID:   "account-1",
+		Type:        "message/rfc822",
+		SizeUnknown: true,
+		Multipart:   true,
+	}
+
+	resp, err := handler.Allocate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if len(resp.Parts) != DefaultMultipartPartCount {
+		t.Errorf("expected %d parts (default), got %d", DefaultMultipartPartCount, len(resp.Parts))
 	}
 }
 

@@ -5,6 +5,7 @@ Tests for the upload-put extension (https://jmap.rrod.net/extensions/upload-put)
 that enables direct upload to S3 via pre-signed URLs.
 """
 
+import os
 import time
 import uuid
 
@@ -12,7 +13,7 @@ import boto3
 import pytest
 import requests
 
-from helpers import make_jmap_request
+from helpers import make_iam_jmap_request, make_jmap_request
 
 
 # ---------------------------------------------------------------------------
@@ -621,3 +622,206 @@ class TestBlobAllocateLimits:
                 cleanup_pending_allocation(
                     dynamodb_table, account_id, alloc["id"], alloc_size, aws_region
                 )
+
+
+# ---------------------------------------------------------------------------
+# Multipart Upload E2E Tests (IAM auth)
+# ---------------------------------------------------------------------------
+
+class TestBlobMultipartUpload:
+    """Tests for the multipart upload flow: Blob/allocate(multipart) → S3 parts → Blob/complete."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def _cleanup_blobs(self, jmap_client, token, account_id):
+        """Class-scoped fixture that cleans up all tracked blobs after the class."""
+        blob_ids: list[str] = []
+        TestBlobMultipartUpload._class_blob_ids = blob_ids
+        yield
+        for blob_id in blob_ids:
+            try:
+                delete_blob(jmap_client, token, account_id, blob_id)
+            except Exception:
+                pass
+
+    def _record_blob(self, blob_id: str | None):
+        """Record a blob ID for cleanup."""
+        if blob_id:
+            TestBlobMultipartUpload._class_blob_ids.append(blob_id)
+
+    def test_multipart_allocate_upload_complete(
+        self, jmap_client, api_url, token, account_id,
+        api_gateway_invoke_url, e2e_test_role_arn, dynamodb_table, aws_region,
+    ):
+        """Full multipart flow: allocate → upload parts to S3 → Blob/complete → verify."""
+        if not api_gateway_invoke_url:
+            pytest.skip("API_GATEWAY_INVOKE_URL not set — cannot run IAM tests")
+        if not e2e_test_role_arn:
+            pytest.skip("E2E_TEST_ROLE_ARN not set — cannot run IAM tests")
+
+        using = ["urn:ietf:params:jmap:core", UPLOAD_PUT_CAPABILITY]
+
+        # Step 1: Allocate multipart
+        allocate_response = make_iam_jmap_request(
+            api_gateway_invoke_url,
+            account_id,
+            [
+                [
+                    "Blob/allocate",
+                    {
+                        "accountId": account_id,
+                        "create": {
+                            "mp0": {
+                                "type": "application/octet-stream",
+                                "size": 0,
+                                "multipart": True,
+                            },
+                        },
+                    },
+                    "allocate0",
+                ]
+            ],
+            region=aws_region,
+            using=using,
+            role_arn=e2e_test_role_arn,
+        )
+
+        assert "methodResponses" in allocate_response, f"No methodResponses: {allocate_response}"
+        name, data, _ = allocate_response["methodResponses"][0]
+        assert name == "Blob/allocate", f"Expected Blob/allocate, got {name}: {data}"
+
+        created = data.get("created", {})
+        assert "mp0" in created, f"mp0 not in created: {data}"
+
+        allocation = created["mp0"]
+        blob_id = allocation["id"]
+        self._record_blob(blob_id)
+
+        # Multipart response has parts array, no url
+        assert "parts" in allocation, f"No parts in multipart allocation: {allocation}"
+        assert "url" not in allocation, f"Multipart allocation should not have url: {allocation}"
+
+        parts = allocation["parts"]
+        assert len(parts) > 0, f"Empty parts array: {allocation}"
+        for part in parts:
+            assert "partNumber" in part, f"Part missing partNumber: {part}"
+            assert "url" in part, f"Part missing url: {part}"
+
+        # Step 2: Upload 2 parts to presigned S3 URLs
+        part1_data = os.urandom(5 * 1024 * 1024)  # 5 MiB (S3 minimum for non-last part)
+        part2_data = os.urandom(1024)               # 1 KiB
+
+        part_payloads = [part1_data, part2_data]
+        completed_parts = []
+
+        for i, part_info in enumerate(parts[:2]):
+            put_resp = requests.put(
+                part_info["url"],
+                data=part_payloads[i],
+                timeout=120,
+            )
+            assert put_resp.status_code in (200, 204), (
+                f"PUT part {part_info['partNumber']} failed: "
+                f"{put_resp.status_code} {put_resp.text}"
+            )
+            etag = put_resp.headers.get("ETag")
+            assert etag, f"No ETag in response for part {part_info['partNumber']}"
+            completed_parts.append({
+                "partNumber": part_info["partNumber"],
+                "etag": etag,
+            })
+
+        # Step 3: Blob/complete
+        complete_response = make_iam_jmap_request(
+            api_gateway_invoke_url,
+            account_id,
+            [
+                [
+                    "Blob/complete",
+                    {
+                        "accountId": account_id,
+                        "id": blob_id,
+                        "parts": completed_parts,
+                    },
+                    "complete0",
+                ]
+            ],
+            region=aws_region,
+            using=using,
+            role_arn=e2e_test_role_arn,
+        )
+
+        assert "methodResponses" in complete_response, f"No methodResponses: {complete_response}"
+        cname, cdata, _ = complete_response["methodResponses"][0]
+        assert cname == "Blob/complete", f"Expected Blob/complete, got {cname}: {cdata}"
+        assert cdata.get("accountId") == account_id, f"Wrong accountId: {cdata}"
+        assert cdata.get("id") == blob_id, f"Wrong id: {cdata}"
+
+        # Step 4: Poll DynamoDB for confirmed status
+        max_wait = 30
+        poll_interval = 2
+        elapsed = 0
+        blob_confirmed = False
+
+        while elapsed < max_wait and not blob_confirmed:
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+            if dynamodb_table:
+                item = get_dynamodb_blob(dynamodb_table, account_id, blob_id, aws_region)
+                if item and item.get("status") == "confirmed":
+                    blob_confirmed = True
+
+        assert blob_confirmed, f"Blob {blob_id} not confirmed after {max_wait}s"
+
+        # Step 5: Download and verify content
+        downloaded = download_blob(jmap_client, token, account_id, blob_id)
+        expected = part1_data + part2_data
+        assert downloaded is not None, "Download returned None"
+        assert len(downloaded) == len(expected), (
+            f"Size mismatch: expected {len(expected)}, got {len(downloaded)}"
+        )
+        assert downloaded == expected, "Downloaded content does not match uploaded parts"
+
+    def test_multipart_rejected_for_cognito(self, api_url, token, account_id):
+        """Blob/allocate with multipart=true is rejected for Cognito auth."""
+        request_body = {
+            "using": ["urn:ietf:params:jmap:core", UPLOAD_PUT_CAPABILITY],
+            "methodCalls": [
+                [
+                    "Blob/allocate",
+                    {
+                        "accountId": account_id,
+                        "create": {
+                            "mp0": {
+                                "type": "application/octet-stream",
+                                "size": 0,
+                                "multipart": True,
+                            },
+                        },
+                    },
+                    "allocate0",
+                ]
+            ],
+        }
+        response = requests.post(
+            api_url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json=request_body,
+            timeout=30,
+        )
+        resp_json = response.json()
+
+        assert "methodResponses" in resp_json, f"No methodResponses: {resp_json}"
+        name, data, _ = resp_json["methodResponses"][0]
+        assert name == "Blob/allocate", f"Expected Blob/allocate, got {name}: {data}"
+
+        not_created = data.get("notCreated")
+        assert not_created is not None, f"Expected notCreated, got: {data}"
+        assert "mp0" in not_created, f"mp0 not in notCreated: {not_created}"
+
+        error = not_created["mp0"]
+        assert error.get("type") == "invalidArguments", (
+            f"Expected invalidArguments error, got: {error.get('type')}"
+        )

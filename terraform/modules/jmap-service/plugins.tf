@@ -43,7 +43,7 @@ resource "aws_dynamodb_table_item" "core_plugin" {
       }
     }
     clientPrincipals = {
-      L = [for arn in var.iam_client_principals : { S = arn }]
+      L = [for arn in concat(var.iam_client_principals, [aws_iam_role.e2e_test_client.arn]) : { S = arn }]
     }
     registeredAt = { S = "2025-01-17T00:00:00Z" }
     version      = { S = "1.0.0" }

@@ -359,3 +359,23 @@ def api_url(jmap_client):
 def upload_url(jmap_client):
     """Get the JMAP upload URL from the session."""
     return jmap_client.jmap_session.upload_url
+
+
+@pytest.fixture(scope="session")
+def api_gateway_invoke_url():
+    """API Gateway invoke URL for IAM-authenticated requests.
+
+    Empty string default so existing Cognito-only tests still run
+    without this env var. Multipart tests skip when empty.
+    """
+    return os.environ.get("API_GATEWAY_INVOKE_URL", "")
+
+
+@pytest.fixture(scope="session")
+def e2e_test_role_arn():
+    """ARN of the IAM role for e2e test client.
+
+    Empty string default so existing tests still run without this env var.
+    IAM-authenticated tests skip when empty.
+    """
+    return os.environ.get("E2E_TEST_ROLE_ARN", "")

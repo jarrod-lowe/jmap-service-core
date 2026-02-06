@@ -44,7 +44,10 @@
         returns a pre-authorized URL to which the client may PUT binary data
         directly. This bypasses JMAP API endpoint payload limitations,
         enabling servers to support upload sizes beyond what their API
-        infrastructure can receive.
+        infrastructure can receive. For blobs of unknown size, this extension
+        also defines a multipart upload mode where <tt>Blob/allocate</tt>
+        returns multiple pre-authorized part URLs, and a companion
+        <tt>Blob/complete</tt> method to finalize the upload.
       </t>
     </abstract>
   </front>
@@ -89,10 +92,12 @@
         limitations.
       </t>
       <t>
-        This extension defines single-request uploads only. Multipart or
-        chunked upload mechanisms (e.g. using multiple HTTP requests for a
-        single blob) are out of scope and may be addressed by a future
-        extension.
+        For blobs where the size is known in advance, this extension uses a
+        single-request upload (HTTP PUT). For blobs where the size is unknown
+        or may exceed the single-request limit, a multipart upload mode is
+        available: the server returns pre-authorized URLs for individual
+        parts, and the client finalizes the upload by calling
+        <tt>Blob/complete</tt> (see <xref target="blob-complete"/>).
       </t>
       <t>
         To use this extension, the client MUST include the capability
@@ -216,6 +221,32 @@ https://jmap.rrod.net/extensions/upload-put
               pending allocations.
             </t>
           </dd>
+
+          <dt>maxMultipartParts</dt>
+          <dd>
+            <t><tt>UnsignedInt</tt></t>
+            <t>
+              The maximum number of upload parts the server will provide
+              for a single multipart allocation. The server returns this
+              many pre-authorized part URLs when the client requests a
+              multipart allocation. If this property is absent or zero,
+              the server does not support multipart uploads.
+            </t>
+          </dd>
+
+          <dt>multipartPartSize</dt>
+          <dd>
+            <t><tt>UnsignedInt</tt></t>
+            <t>
+              The size of each upload part in octets, except for the last
+              part which MAY be smaller. The maximum blob size for
+              multipart uploads is
+              <tt>maxMultipartParts * multipartPartSize</tt>.
+              Servers SHOULD use a part size of at least 5,242,880 octets
+              (5 MB) to satisfy common object storage minimum part size
+              requirements.
+            </t>
+          </dd>
         </dl>
         <t>
           These limits are defined at the account level, following the
@@ -325,6 +356,28 @@ https://jmap.rrod.net/extensions/upload-put
               actual upload size MUST match this declared size exactly; see
               <xref target="size-validation"/> for enforcement details.
             </t>
+            <t>
+              If <tt>multipart</tt> is <tt>true</tt>, this property MUST be
+              set to <tt>0</tt> to indicate that the total size is unknown
+              in advance. The server does not enforce a declared size for
+              multipart uploads; the actual size is determined when the
+              upload is completed.
+            </t>
+          </dd>
+
+          <dt>multipart</dt>
+          <dd>
+            <t><tt>Boolean</tt> (default: <tt>false</tt>)</t>
+            <t>
+              If <tt>true</tt>, the server allocates a multipart upload
+              instead of returning a single PUT URL. The response will
+              contain a <tt>parts</tt> array of pre-authorized URLs for
+              uploading individual parts, rather than a single <tt>url</tt>.
+              The client MUST call <tt>Blob/complete</tt>
+              (<xref target="blob-complete"/>) after uploading all parts to
+              finalize the blob. When <tt>multipart</tt> is <tt>true</tt>,
+              the <tt>size</tt> property MUST be <tt>0</tt>.
+            </t>
           </dd>
         </dl>
       </section>
@@ -383,7 +436,7 @@ https://jmap.rrod.net/extensions/upload-put
 
               <dt>url</dt>
               <dd>
-                <t><tt>String</tt></t>
+                <t><tt>String|null</tt></t>
                 <t>
                   A pre-authorized URL to which the client MUST PUT the
                   binary data. The URL MUST use the <tt>https</tt> scheme
@@ -394,6 +447,47 @@ https://jmap.rrod.net/extensions/upload-put
                   at 10 Mbps takes approximately 3.5 minutes for transfer
                   alone, plus overhead for connection setup and retries).
                 </t>
+                <t>
+                  This property is <tt>null</tt> for multipart allocations.
+                  Multipart allocations use the <tt>parts</tt> property
+                  instead.
+                </t>
+              </dd>
+
+              <dt>parts</dt>
+              <dd>
+                <t><tt>PartURL[]|null</tt></t>
+                <t>
+                  An array of pre-authorized URLs for uploading individual
+                  parts of a multipart upload. Each <tt>PartURL</tt> object
+                  has the following properties:
+                </t>
+                <dl>
+                  <dt>partNumber</dt>
+                  <dd>
+                    <t><tt>UnsignedInt</tt></t>
+                    <t>
+                      The part number, starting from 1. The client MUST
+                      upload parts using these part numbers and report
+                      them in the <tt>Blob/complete</tt> call.
+                    </t>
+                  </dd>
+                  <dt>url</dt>
+                  <dd>
+                    <t><tt>String</tt></t>
+                    <t>
+                      A pre-authorized URL to which the client MUST PUT the
+                      binary data for this part. Each part (except the last)
+                      MUST be exactly <tt>multipartPartSize</tt> octets.
+                      The last part MAY be smaller.
+                    </t>
+                  </dd>
+                </dl>
+                <t>
+                  This property is <tt>null</tt> for non-multipart
+                  allocations. Non-multipart allocations use the
+                  <tt>url</tt> property instead.
+                </t>
               </dd>
 
               <dt>expires</dt>
@@ -402,7 +496,7 @@ https://jmap.rrod.net/extensions/upload-put
                   <tt>UTCDate</tt> (<xref target="RFC8620"/> Section 1.4)
                 </t>
                 <t>
-                  The time at which the pre-authorized URL expires. The
+                  The time at which the pre-authorized URL(s) expire. The
                   client MUST initiate the upload before this time.
                   Clients SHOULD allow sufficient time for the upload to
                   complete, accounting for blob size and network
@@ -479,6 +573,65 @@ https://jmap.rrod.net/extensions/upload-put
             "type": "message/rfc822",
             "size": 15000000,
             "url": "https://storage.example.com/u12345/G1a2b3c4?...",
+            "parts": null,
+            "expires": "2099-07-01T10:05:00Z"
+          }
+        },
+        "notCreated": null
+      },
+      "c0"
+    ]
+  ]
+}
+]]></sourcecode>
+      </section>
+
+      <section anchor="allocate-multipart-example">
+        <name>Multipart Example</name>
+        <t>Request:</t>
+        <sourcecode type="json"><![CDATA[
+{
+  "using": [
+    "urn:ietf:params:jmap:core",
+    "https://jmap.rrod.net/extensions/upload-put"
+  ],
+  "methodCalls": [
+    [
+      "Blob/allocate",
+      {
+        "accountId": "u12345",
+        "create": {
+          "a0": {
+            "type": "message/rfc822",
+            "size": 0,
+            "multipart": true
+          }
+        }
+      },
+      "c0"
+    ]
+  ]
+}
+]]></sourcecode>
+        <t>Response (parts array truncated for brevity):</t>
+        <sourcecode type="json"><![CDATA[
+{
+  "methodResponses": [
+    [
+      "Blob/allocate",
+      {
+        "accountId": "u12345",
+        "created": {
+          "a0": {
+            "id": "G9x8y7z6w5",
+            "type": "message/rfc822",
+            "size": 0,
+            "url": null,
+            "parts": [
+              {"partNumber": 1, "url": "https://storage.example.com/u12345/G9x8y7z6w5?partNumber=1&..."},
+              {"partNumber": 2, "url": "https://storage.example.com/u12345/G9x8y7z6w5?partNumber=2&..."},
+              {"partNumber": 3, "url": "https://storage.example.com/u12345/G9x8y7z6w5?partNumber=3&..."}
+            ],
             "expires": "2099-07-01T10:05:00Z"
           }
         },
@@ -699,6 +852,173 @@ https://jmap.rrod.net/extensions/upload-put
       </section>
     </section>
 
+    <section anchor="blob-complete">
+      <name>The Blob/complete Method</name>
+      <t>
+        The <tt>Blob/complete</tt> method finalizes a multipart upload that
+        was initiated by <tt>Blob/allocate</tt> with
+        <tt>multipart: true</tt>. After uploading all parts to their
+        respective pre-authorized URLs, the client calls
+        <tt>Blob/complete</tt> to assemble the parts into a single blob.
+      </t>
+
+      <section anchor="complete-request">
+        <name>Request</name>
+        <t>
+          A <tt>Blob/complete</tt> method call is made through the standard
+          JMAP API endpoint (<tt>/jmap</tt>). The request object MUST
+          contain the following properties:
+        </t>
+        <dl>
+          <dt>accountId</dt>
+          <dd>
+            <t><tt>Id</tt></t>
+            <t>The id of the account the blob belongs to.</t>
+          </dd>
+
+          <dt>id</dt>
+          <dd>
+            <t><tt>Id</tt></t>
+            <t>
+              The blob identifier returned by <tt>Blob/allocate</tt> for
+              the multipart allocation.
+            </t>
+          </dd>
+
+          <dt>parts</dt>
+          <dd>
+            <t><tt>CompletedPart[]</tt></t>
+            <t>
+              An array of objects describing the successfully uploaded
+              parts. Each <tt>CompletedPart</tt> object has the following
+              properties:
+            </t>
+            <dl>
+              <dt>partNumber</dt>
+              <dd>
+                <t><tt>UnsignedInt</tt></t>
+                <t>
+                  The part number as provided in the allocation response.
+                </t>
+              </dd>
+              <dt>etag</dt>
+              <dd>
+                <t><tt>String</tt></t>
+                <t>
+                  The entity tag returned by the server in the
+                  <tt>ETag</tt> HTTP response header when the part was
+                  uploaded. The client MUST capture this value from each
+                  part upload response.
+                </t>
+              </dd>
+            </dl>
+            <t>
+              The array MUST NOT be empty. Parts SHOULD be listed in
+              ascending order by <tt>partNumber</tt>. The client is not
+              required to upload all parts provided in the allocation; only
+              uploaded parts should be listed.
+            </t>
+          </dd>
+        </dl>
+      </section>
+
+      <section anchor="complete-response">
+        <name>Response</name>
+        <t>The response object MUST contain:</t>
+        <dl>
+          <dt>accountId</dt>
+          <dd>
+            <t><tt>Id</tt></t>
+            <t>The id of the account used for the call.</t>
+          </dd>
+
+          <dt>id</dt>
+          <dd>
+            <t><tt>Id</tt></t>
+            <t>
+              The blob identifier. After a successful response, references
+              to this <tt>id</tt> in JMAP methods will resolve once the
+              server has finished processing the upload. Processing
+              typically completes within a few seconds.
+            </t>
+          </dd>
+        </dl>
+      </section>
+
+      <section anchor="complete-errors">
+        <name>Errors</name>
+        <t>
+          In addition to the standard JMAP method-level errors
+          (<xref target="RFC8620"/> Section 3.6.2), the following errors
+          may be returned:
+        </t>
+        <dl>
+          <dt>blobNotFound</dt>
+          <dd>
+            The specified <tt>id</tt> does not correspond to a pending
+            multipart allocation. The allocation may have expired or the
+            <tt>id</tt> may be invalid.
+          </dd>
+
+          <dt>invalidArguments</dt>
+          <dd>
+            The <tt>parts</tt> array is empty, the blob is not a
+            multipart allocation, or the blob is not in a pending state.
+          </dd>
+
+          <dt>serverFail</dt>
+          <dd>
+            The server encountered an error while assembling the parts
+            into the final blob, or the blob record is in an
+            inconsistent state.
+          </dd>
+        </dl>
+      </section>
+
+      <section anchor="complete-example">
+        <name>Example</name>
+        <t>Request:</t>
+        <sourcecode type="json"><![CDATA[
+{
+  "using": [
+    "urn:ietf:params:jmap:core",
+    "https://jmap.rrod.net/extensions/upload-put"
+  ],
+  "methodCalls": [
+    [
+      "Blob/complete",
+      {
+        "accountId": "u12345",
+        "id": "G1a2b3c4d5",
+        "parts": [
+          {"partNumber": 1, "etag": "\"a54357aff0632cce46d942af68356b38\""},
+          {"partNumber": 2, "etag": "\"0c78aef83f66abc1fa1e8477f296d394\""},
+          {"partNumber": 3, "etag": "\"acbd18db4cc2f85cedef654fccc4a4d8\""}
+        ]
+      },
+      "c0"
+    ]
+  ]
+}
+]]></sourcecode>
+        <t>Response:</t>
+        <sourcecode type="json"><![CDATA[
+{
+  "methodResponses": [
+    [
+      "Blob/complete",
+      {
+        "accountId": "u12345",
+        "id": "G1a2b3c4d5"
+      },
+      "c0"
+    ]
+  ]
+}
+]]></sourcecode>
+      </section>
+    </section>
+
     <section anchor="interaction-with-rfc8620">
       <name>Interaction with RFC 8620</name>
 
@@ -855,6 +1175,38 @@ https://jmap.rrod.net/extensions/upload-put
             <strong>Allocation flooding</strong>: Rapidly calling
             <tt>Blob/allocate</tt> to exhaust <tt>maxPendingAllocations</tt>,
             preventing legitimate uploads until allocations expire.
+          </li>
+        </ul>
+      </section>
+
+      <section anchor="multipart-security">
+        <name>Multipart Upload Security</name>
+        <t>
+          Multipart uploads introduce additional security considerations
+          beyond single-request uploads:
+        </t>
+        <ul>
+          <li>
+            <strong>Part URL exposure</strong>: A multipart allocation
+            returns multiple pre-authorized URLs. Compromise of any single
+            part URL allows an attacker to overwrite that part's data.
+            Clients MUST protect all part URLs with the same care as a
+            single upload URL. The security requirements in
+            <xref target="url-security"/> apply to each individual part
+            URL.
+          </li>
+          <li>
+            <strong>Incomplete uploads</strong>: If a client uploads some
+            parts but never calls <tt>Blob/complete</tt>, the uploaded
+            parts consume server storage without producing a usable blob.
+            Servers SHOULD implement a cleanup mechanism to abort
+            incomplete multipart uploads after the allocation expires.
+          </li>
+          <li>
+            <strong>Part URL management</strong>: Clients receive many
+            pre-authorized URLs in a single response. Clients SHOULD NOT
+            persist these URLs beyond the immediate upload session and
+            SHOULD NOT include them in client-side logs.
           </li>
         </ul>
       </section>
