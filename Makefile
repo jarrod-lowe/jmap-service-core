@@ -326,7 +326,8 @@ invalidate-cache: $(ENV_DIR)/.terraform
 	echo "✓ Cache invalidation initiated"
 
 # Generate test-user.yaml from Terraform outputs (test environment only)
-generate-test-user-yaml: $(ENV_DIR)/.terraform
+# This is a real file target, not phony
+test-user.yaml: $(ENV_DIR)/.terraform
 	@if [ "$(ENV)" != "test" ]; then \
 		echo "❌ test-user.yaml is only for test environment"; \
 		exit 1; \
@@ -345,17 +346,17 @@ generate-test-user-yaml: $(ENV_DIR)/.terraform
 	yq '. head_comment = "Auto-generated test user credentials (DO NOT COMMIT)\nGenerated: " + strenv(TIMESTAMP) + "\nTo regenerate: AWS_PROFILE=ses-mail make generate-test-user-yaml ENV=test"' \
 	> ../../../test-user.yaml
 	@echo "✅ Created test-user.yaml"
-	@echo "   Username: $$(yq '.env.test.username' test-user.yaml)"
+	@echo "   Username: $$(yq '.env.test.username' ../../../test-user.yaml)"
 	@echo "   ⚠️  Keep this file secure and do NOT commit it to git"
 
+# Phony alias for backward compatibility
+generate-test-user-yaml: test-user.yaml
+
 # Convenience target: apply and generate test-user.yaml in one command
-apply-test: apply
-	@if [ "$(ENV)" = "test" ]; then \
-		$(MAKE) generate-test-user-yaml ENV=test; \
-	fi
+apply-test: apply test-user.yaml
 
 # Get Cognito JWT token for test user
-get-token: $(ENV_DIR)/.terraform
+get-token: $(ENV_DIR)/.terraform test-user.yaml
 	@cd $(ENV_DIR) && \
 	USER_POOL_ID=$$(terraform output -raw cognito_user_pool_id) && \
 	CLIENT_ID=$$(terraform output -raw cognito_client_id) && \
