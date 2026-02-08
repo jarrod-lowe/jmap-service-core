@@ -119,21 +119,8 @@ func (d *DynamoDBStore) AllocateBlob(ctx context.Context, accountID, blobID stri
 		ExpressionAttributeValues: exprValues,
 	}
 
-	// Transaction: Update META# and Put blob record
-	_, err = d.client.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
-		TransactItems: []types.TransactWriteItem{
-			{
-				Update: metaUpdate,
-			},
-			{
-				Put: &types.Put{
-					TableName:           aws.String(d.tableName),
-					Item:                blobAV,
-					ConditionExpression: aws.String("attribute_not_exists(pk)"),
-				},
-			},
-		},
-	})
+	// Transaction: Update META# and Put blob record with retry logic
+	err = d.executeAllocationWithRetry(ctx, metaUpdate, blobAV)
 
 	if err != nil {
 		// Check for transaction cancellation reasons
@@ -157,6 +144,66 @@ func (d *DynamoDBStore) AllocateBlob(ctx context.Context, accountID, blobID stri
 	}
 
 	return nil
+}
+
+// executeAllocationTransaction executes the DynamoDB transaction for blob allocation
+func (d *DynamoDBStore) executeAllocationTransaction(
+	ctx context.Context,
+	metaUpdate *types.Update,
+	blobItem map[string]types.AttributeValue,
+) error {
+	_, err := d.client.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
+		TransactItems: []types.TransactWriteItem{
+			{Update: metaUpdate},
+			{Put: &types.Put{
+				TableName:           aws.String(d.tableName),
+				Item:                blobItem,
+				ConditionExpression: aws.String("attribute_not_exists(pk)"),
+			}},
+		},
+	})
+	return err
+}
+
+// executeAllocationWithRetry wraps transaction execution with retry logic for TransactionConflict
+func (d *DynamoDBStore) executeAllocationWithRetry(
+	ctx context.Context,
+	metaUpdate *types.Update,
+	blobItem map[string]types.AttributeValue,
+) error {
+	const maxRetries = 3
+	var err error
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		err = d.executeAllocationTransaction(ctx, metaUpdate, blobItem)
+
+		if err == nil {
+			return nil // Success
+		}
+
+		// Check if this is a TransactionConflict that we should retry
+		shouldRetry := false
+		var txCanceled *types.TransactionCanceledException
+		if errors.As(err, &txCanceled) {
+			for _, reason := range txCanceled.CancellationReasons {
+				if reason.Code != nil && *reason.Code == "TransactionConflict" {
+					shouldRetry = true
+					break
+				}
+			}
+		}
+
+		// If we found a TransactionConflict and haven't exhausted retries, retry
+		if shouldRetry && attempt < maxRetries {
+			time.Sleep(50 * time.Millisecond * (1 << attempt)) // 50ms, 100ms, 200ms
+			continue
+		}
+
+		// ConditionalCheckFailed, exhausted retries, or other error - stop retrying
+		break
+	}
+
+	return err
 }
 
 // diagnoseMetaConditionFailure determines why the META# condition failed

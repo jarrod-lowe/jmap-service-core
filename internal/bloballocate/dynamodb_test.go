@@ -288,3 +288,165 @@ func stringPtr(s string) *string {
 func ctx() context.Context {
 	return context.Background()
 }
+
+// TestAllocateBlob_TransactionConflict_SucceedsOnRetry verifies that a TransactionConflict
+// error is retried and succeeds on the second attempt.
+func TestAllocateBlob_TransactionConflict_SucceedsOnRetry(t *testing.T) {
+	callCount := 0
+	client := &CapturingDynamoDBClient{
+		TransactWriteItemsFunc: func(ctx context.Context, params *dynamodb.TransactWriteItemsInput, optFns ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error) {
+			callCount++
+			if callCount == 1 {
+				// First call fails with TransactionConflict on META# update (item 0)
+				return nil, &types.TransactionCanceledException{
+					CancellationReasons: []types.CancellationReason{
+						{Code: stringPtr("TransactionConflict")}, // META# update
+						{Code: stringPtr("None")},                 // BLOB# create (would have succeeded)
+					},
+				}
+			}
+			// Second call succeeds
+			return &dynamodb.TransactWriteItemsOutput{}, nil
+		},
+	}
+	store := NewDynamoDBStore(client, "test-table")
+
+	err := store.AllocateBlob(ctx(), "account-1", "blob-1", 1024, "application/pdf",
+		time.Now().Add(15*time.Minute), 4, "account-1/blob-1", false, "", false)
+
+	if err != nil {
+		t.Fatalf("expected success after retry, got error: %v", err)
+	}
+	if callCount != 2 {
+		t.Errorf("expected exactly 2 calls (1 failure + 1 retry), got %d", callCount)
+	}
+}
+
+// TestAllocateBlob_TransactionConflict_ExhaustsRetries verifies that after max retries
+// with TransactionConflict, the error is returned to the caller.
+func TestAllocateBlob_TransactionConflict_ExhaustsRetries(t *testing.T) {
+	callCount := 0
+	client := &CapturingDynamoDBClient{
+		TransactWriteItemsFunc: func(ctx context.Context, params *dynamodb.TransactWriteItemsInput, optFns ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error) {
+			callCount++
+			// Always fail with TransactionConflict
+			return nil, &types.TransactionCanceledException{
+				CancellationReasons: []types.CancellationReason{
+					{Code: stringPtr("TransactionConflict")},
+					{Code: stringPtr("None")},
+				},
+			}
+		},
+	}
+	store := NewDynamoDBStore(client, "test-table")
+
+	err := store.AllocateBlob(ctx(), "account-1", "blob-1", 1024, "application/pdf",
+		time.Now().Add(15*time.Minute), 4, "account-1/blob-1", false, "", false)
+
+	if err == nil {
+		t.Fatal("expected error after exhausting retries, got nil")
+	}
+	// Expect 4 total calls: 1 initial + 3 retries
+	if callCount != 4 {
+		t.Errorf("expected 4 calls (1 initial + 3 retries), got %d", callCount)
+	}
+	// Error message should indicate transaction failed
+	if !strings.Contains(err.Error(), "transaction failed") {
+		t.Errorf("expected 'transaction failed' in error message, got: %v", err)
+	}
+}
+
+// TestAllocateBlob_ConditionalCheckFailed_NoRetry verifies that ConditionalCheckFailed
+// errors (like quota exceeded) are NOT retried.
+func TestAllocateBlob_ConditionalCheckFailed_NoRetry(t *testing.T) {
+	callCount := 0
+	client := &CapturingDynamoDBClient{
+		TransactWriteItemsFunc: func(ctx context.Context, params *dynamodb.TransactWriteItemsInput, optFns ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error) {
+			callCount++
+			return nil, &types.TransactionCanceledException{
+				CancellationReasons: []types.CancellationReason{
+					{Code: stringPtr("ConditionalCheckFailed")}, // META# condition failed (e.g., quota)
+					{Code: stringPtr("None")},
+				},
+			}
+		},
+		GetItemFunc: func(ctx context.Context, params *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+			// Return account with insufficient quota
+			return &dynamodb.GetItemOutput{
+				Item: map[string]types.AttributeValue{
+					"quotaRemaining": &types.AttributeValueMemberN{Value: "100"}, // Less than 1024 requested
+				},
+			}, nil
+		},
+	}
+	store := NewDynamoDBStore(client, "test-table")
+
+	err := store.AllocateBlob(ctx(), "account-1", "blob-1", 1024, "application/pdf",
+		time.Now().Add(15*time.Minute), 4, "account-1/blob-1", false, "", false)
+
+	if err == nil {
+		t.Fatal("expected error from ConditionalCheckFailed, got nil")
+	}
+	// Should only call once - NO retries for ConditionalCheckFailed
+	if callCount != 1 {
+		t.Errorf("expected exactly 1 call (no retries for ConditionalCheckFailed), got %d", callCount)
+	}
+	// Should return an AllocationError with proper type
+	allocErr, ok := err.(*AllocationError)
+	if !ok {
+		t.Fatalf("expected AllocationError, got %T: %v", err, err)
+	}
+	if allocErr.Type != "overQuota" {
+		t.Errorf("expected overQuota error type, got %s", allocErr.Type)
+	}
+}
+
+// TestAllocateBlob_TransactionConflict_MultipleRetries verifies exponential backoff timing
+// by checking that retries happen with increasing delays.
+func TestAllocateBlob_TransactionConflict_MultipleRetries(t *testing.T) {
+	callCount := 0
+	var callTimes []time.Time
+	client := &CapturingDynamoDBClient{
+		TransactWriteItemsFunc: func(ctx context.Context, params *dynamodb.TransactWriteItemsInput, optFns ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error) {
+			callCount++
+			callTimes = append(callTimes, time.Now())
+
+			if callCount <= 2 {
+				// Fail first 2 attempts with TransactionConflict
+				return nil, &types.TransactionCanceledException{
+					CancellationReasons: []types.CancellationReason{
+						{Code: stringPtr("TransactionConflict")},
+						{Code: stringPtr("None")},
+					},
+				}
+			}
+			// Third attempt succeeds
+			return &dynamodb.TransactWriteItemsOutput{}, nil
+		},
+	}
+	store := NewDynamoDBStore(client, "test-table")
+
+	err := store.AllocateBlob(ctx(), "account-1", "blob-1", 1024, "application/pdf",
+		time.Now().Add(15*time.Minute), 4, "account-1/blob-1", false, "", false)
+
+	if err != nil {
+		t.Fatalf("expected success after retries, got error: %v", err)
+	}
+	if callCount != 3 {
+		t.Errorf("expected 3 calls (1 initial + 2 retries), got %d", callCount)
+	}
+
+	// Verify exponential backoff: delays should be ~50ms, ~100ms
+	if len(callTimes) >= 2 {
+		delay1 := callTimes[1].Sub(callTimes[0])
+		if delay1 < 40*time.Millisecond || delay1 > 70*time.Millisecond {
+			t.Errorf("expected first retry delay ~50ms, got %v", delay1)
+		}
+	}
+	if len(callTimes) >= 3 {
+		delay2 := callTimes[2].Sub(callTimes[1])
+		if delay2 < 80*time.Millisecond || delay2 > 130*time.Millisecond {
+			t.Errorf("expected second retry delay ~100ms, got %v", delay2)
+		}
+	}
+}
