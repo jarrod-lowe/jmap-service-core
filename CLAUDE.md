@@ -42,6 +42,20 @@ AWS_PROFILE=ses-mail make get-token ENV=test
 
 This outputs a Cognito JWT token for the test user, which can be used with JMAP clients like jmap-demo-webmail.
 
+**Resetting environment data:**
+
+```bash
+AWS_PROFILE=ses-mail make reset ENV=test
+```
+
+This removes all S3 blobs, DynamoDB records (except plugins), and Cognito users (except the test user from test-user.yaml). The test user's account is reinitialized with fresh quota.
+
+Use `--dry-run` to preview changes:
+
+```bash
+AWS_PROFILE=ses-mail make reset ENV=test RESET_FLAGS="--dry-run"
+```
+
 ## Architecture Overview
 
 ### High-Level Components

@@ -1,4 +1,4 @@
-.PHONY: help deps build build-all package package-all test test-go test-cloudfront integration-test jmap-client-test lint init plan show-plan apply plan-destroy destroy clean clean-all fmt validate outputs restore-tfvars help-tfvars invalidate-cache get-token docs
+.PHONY: help deps build build-all package package-all test test-go test-cloudfront integration-test jmap-client-test reset lint init plan show-plan apply plan-destroy destroy clean clean-all fmt validate outputs restore-tfvars help-tfvars invalidate-cache get-token docs
 
 # Environment selection (test or prod)
 ENV ?= test
@@ -49,6 +49,8 @@ help:
 	@echo "  make test-cloudfront         - Run CloudFront function tests only"
 	@echo "  make integration-test ENV=<env> - Run integration tests against deployed env"
 	@echo "  make jmap-client-test ENV=<env> - Run JMAP protocol compliance tests (jmapc)"
+	@echo "  make reset ENV=<env>         - Reset environment data (S3, DynamoDB, Cognito)"
+	@echo "                                 Use RESET_FLAGS=\"--dry-run\" to preview"
 	@echo "  make get-token ENV=<env>     - Get Cognito JWT token for test user"
 	@echo "  make docs                    - Render extension docs (xml2rfc to text)"
 	@echo "  make lint                    - Run golangci-lint (required)"
@@ -166,6 +168,12 @@ docs: $(EXTENSION_TXTS)
 jmap-client-test: scripts/.venv
 	@echo "Running JMAP protocol compliance tests for $(ENV) environment..."
 	@PYTEST_ARGS="$(PYTEST_ARGS)" ./scripts/jmap-client-test.sh $(ENV)
+
+# Reset environment data (S3, DynamoDB, Cognito users except test user)
+RESET_FLAGS ?=
+reset: $(ENV_DIR)/.terraform
+	@echo "Resetting $(ENV) environment data..."
+	@./scripts/reset.sh $(ENV) $(RESET_FLAGS)
 
 # Run linter - MUST be installed
 # PATH includes ~/go/bin for go-installed tools
