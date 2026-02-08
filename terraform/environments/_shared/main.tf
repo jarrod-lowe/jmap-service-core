@@ -25,6 +25,10 @@ terraform {
       source  = "hashicorp/time"
       version = "~> 0.9"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.0"
+    }
   }
 }
 
@@ -74,4 +78,5 @@ module "jmap_service" {
   cloudfront_signing_key_rotation_phase = var.cloudfront_signing_key_rotation_phase
   cloudfront_signing_key_max_age_days   = var.cloudfront_signing_key_max_age_days
   alarm_sns_topic_arn                   = var.alarm_sns_topic_arn
+  test_user_emails                      = var.test_user_emails
 }

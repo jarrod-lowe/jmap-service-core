@@ -64,3 +64,9 @@ variable "alarm_sns_topic_arn" {
   description = "SNS topic ARN for alarm notifications"
   type        = string
 }
+
+variable "test_user_emails" {
+  description = "List of email addresses for test users to create"
+  type        = list(string)
+  default     = []
+}

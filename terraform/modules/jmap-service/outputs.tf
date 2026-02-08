@@ -141,3 +141,20 @@ output "e2e_test_role_arn" {
   description = "ARN of the IAM role for e2e test client"
   value       = aws_iam_role.e2e_test_client.arn
 }
+
+# Test user outputs
+output "test_user_credentials" {
+  description = "Test user credentials (only in test environment)"
+  sensitive   = true
+  value = {
+    for idx, email in var.test_user_emails : email => {
+      username = aws_cognito_user.test_user[idx].username
+      password = random_password.test_user[idx].result
+    }
+  }
+}
+
+output "test_user_count" {
+  description = "Number of test users created"
+  value       = length(var.test_user_emails)
+}

@@ -135,3 +135,15 @@ output "e2e_test_role_arn" {
   description = "ARN of the IAM role for e2e test client"
   value       = module.jmap_service.e2e_test_role_arn
 }
+
+# Test user outputs
+output "test_user_credentials" {
+  description = "Test user credentials (only in test environment)"
+  sensitive   = true
+  value       = module.jmap_service.test_user_credentials
+}
+
+output "test_user_count" {
+  description = "Number of test users created"
+  value       = module.jmap_service.test_user_count
+}

@@ -195,3 +195,16 @@ variable "anomaly_detection_evaluation_frequency" {
     error_message = "Must be 300 (5min), 900 (15min), 1800 (30min), or 3600 (1hr)"
   }
 }
+
+variable "test_user_emails" {
+  description = "List of email addresses for test users to create (only in test environment)"
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = alltrue([
+      for email in var.test_user_emails : can(regex("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$", email))
+    ])
+    error_message = "All test user emails must be valid email addresses."
+  }
+}

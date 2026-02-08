@@ -1,4 +1,4 @@
-.PHONY: help deps build build-all package package-all test test-go test-cloudfront integration-test jmap-client-test reset lint init plan show-plan apply plan-destroy destroy clean clean-all fmt validate outputs restore-tfvars help-tfvars invalidate-cache get-token docs
+.PHONY: help deps build build-all package package-all test test-go test-cloudfront integration-test jmap-client-test reset lint init plan show-plan apply apply-test plan-destroy destroy clean clean-all fmt validate outputs restore-tfvars help-tfvars invalidate-cache get-token generate-test-user-yaml docs
 
 # Environment selection (test or prod)
 ENV ?= test
@@ -52,6 +52,7 @@ help:
 	@echo "  make reset ENV=<env>         - Reset environment data (S3, DynamoDB, Cognito)"
 	@echo "                                 Use RESET_FLAGS=\"--dry-run\" to preview"
 	@echo "  make get-token ENV=<env>     - Get Cognito JWT token for test user"
+	@echo "  make generate-test-user-yaml ENV=test - Generate test-user.yaml from Terraform outputs"
 	@echo "  make docs                    - Render extension docs (xml2rfc to text)"
 	@echo "  make lint                    - Run golangci-lint (required)"
 	@echo ""
@@ -60,6 +61,7 @@ help:
 	@echo "  make plan ENV=<env>          - Create Terraform plan file"
 	@echo "  make show-plan ENV=<env>     - Display the Terraform plan"
 	@echo "  make apply ENV=<env>         - Apply the plan file (requires plan)"
+	@echo "  make apply-test ENV=test     - Apply Terraform and generate test-user.yaml"
 	@echo "  make plan-destroy ENV=<env>  - Create destroy plan file"
 	@echo "  make destroy ENV=<env>       - Apply the destroy plan (requires plan-destroy)"
 	@echo "  make fmt                     - Format Terraform files"
@@ -323,19 +325,48 @@ invalidate-cache: $(ENV_DIR)/.terraform
 		--output text; \
 	echo "✓ Cache invalidation initiated"
 
+# Generate test-user.yaml from Terraform outputs (test environment only)
+generate-test-user-yaml: $(ENV_DIR)/.terraform
+	@if [ "$(ENV)" != "test" ]; then \
+		echo "❌ test-user.yaml is only for test environment"; \
+		exit 1; \
+	fi
+	@echo "Generating test-user.yaml from Terraform outputs..."
+	@cd $(ENV_DIR) && \
+	CREDS=$$(terraform output -json test_user_credentials) && \
+	if [ "$$CREDS" = "null" ] || [ -z "$$CREDS" ]; then \
+		echo "❌ No test users configured. Set test_user_emails in terraform.tfvars"; \
+		exit 1; \
+	fi && \
+	export USERNAME=$$(echo "$$CREDS" | jq -r 'to_entries[0].value.username') && \
+	export PASSWORD=$$(echo "$$CREDS" | jq -r 'to_entries[0].value.password') && \
+	export TIMESTAMP=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+	yq -n '.env.test.username = strenv(USERNAME) | .env.test.password = strenv(PASSWORD)' | \
+	yq '. head_comment = "Auto-generated test user credentials (DO NOT COMMIT)\nGenerated: " + strenv(TIMESTAMP) + "\nTo regenerate: AWS_PROFILE=ses-mail make generate-test-user-yaml ENV=test"' \
+	> ../../../test-user.yaml
+	@echo "✅ Created test-user.yaml"
+	@echo "   Username: $$(yq '.env.test.username' test-user.yaml)"
+	@echo "   ⚠️  Keep this file secure and do NOT commit it to git"
+
+# Convenience target: apply and generate test-user.yaml in one command
+apply-test: apply
+	@if [ "$(ENV)" = "test" ]; then \
+		$(MAKE) generate-test-user-yaml ENV=test; \
+	fi
+
 # Get Cognito JWT token for test user
 get-token: $(ENV_DIR)/.terraform
 	@cd $(ENV_DIR) && \
 	USER_POOL_ID=$$(terraform output -raw cognito_user_pool_id) && \
 	CLIENT_ID=$$(terraform output -raw cognito_client_id) && \
 	REGION=$$(echo "$$USER_POOL_ID" | cut -d'_' -f1) && \
-	USERNAME=$$(yq ".env.$(ENV).username" ../../../test-user.yaml) && \
-	PASSWORD=$$(yq ".env.$(ENV).password" ../../../test-user.yaml) && \
+	USERNAME=$$(yq -r ".env.$(ENV).username" ../../../test-user.yaml) && \
+	PASSWORD=$$(yq -r ".env.$(ENV).password" ../../../test-user.yaml) && \
 	aws cognito-idp admin-initiate-auth \
 		--user-pool-id "$$USER_POOL_ID" \
 		--client-id "$$CLIENT_ID" \
 		--auth-flow ADMIN_NO_SRP_AUTH \
-		--auth-parameters "USERNAME=$$USERNAME,PASSWORD=$$PASSWORD" \
+		--auth-parameters "$$(jq -n --arg u "$$USERNAME" --arg p "$$PASSWORD" '{USERNAME: $$u, PASSWORD: $$p}')" \
 		--region "$$REGION" \
 		--query 'AuthenticationResult.IdToken' \
 		--output text

@@ -311,8 +311,8 @@ clean_cognito() {
 
     # Extract usernames, excluding the test user
     local users
-    users=$(echo "$users_output" | jq -r --arg test_user "$TEST_USERNAME" \
-        '.Users[] | select(.Username != $test_user) | .Username' 2>/dev/null || echo "")
+    users=$(echo "$users_output" | jq -r --arg test_email "$TEST_USERNAME" \
+        '.Users[] | select((.Attributes | map(select(.Name == "email" and .Value == $test_email)) | length) == 0) | .Username' 2>/dev/null || echo "")
 
     if [[ -z "$users" ]]; then
         echo -e "${GREEN}  No users to delete (only test user exists)${NC}"
@@ -367,10 +367,11 @@ reinitialize_account() {
         if echo "$user_check" | grep -q "UserNotFoundException"; then
             echo -e "${RED}ERROR: Test user '$TEST_USERNAME' does not exist in Cognito${NC}"
             echo ""
-            echo "The test user is required and should be created by Terraform."
-            echo "Please run the following to create it:"
+            echo "The test user should have been created automatically by Terraform."
             echo ""
-            echo -e "  ${GREEN}AWS_PROFILE=$AWS_PROFILE make apply ENV=$ENV${NC}"
+            echo "Please run the following to deploy and generate credentials:"
+            echo ""
+            echo -e "  ${GREEN}AWS_PROFILE=$AWS_PROFILE make apply-test ENV=$ENV${NC}"
             echo ""
             return 1
         else
@@ -398,11 +399,16 @@ reinitialize_account() {
     # Authenticate to trigger the Post Authentication Lambda
     local auth_result
     local auth_exit_code
+    local auth_params
+    auth_params=$(jq -n \
+        --arg username "$TEST_USERNAME" \
+        --arg password "$TEST_PASSWORD" \
+        '{USERNAME: $username, PASSWORD: $password}')
     auth_result=$(AWS_PROFILE="$AWS_PROFILE" aws cognito-idp admin-initiate-auth \
         --user-pool-id "$USER_POOL_ID" \
         --client-id "$CLIENT_ID" \
         --auth-flow ADMIN_NO_SRP_AUTH \
-        --auth-parameters "USERNAME=$TEST_USERNAME,PASSWORD=$TEST_PASSWORD" \
+        --auth-parameters "$auth_params" \
         --region "$REGION" 2>&1)
     auth_exit_code=$?
 

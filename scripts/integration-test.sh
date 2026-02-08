@@ -112,11 +112,16 @@ get_token() {
     echo "Authenticating..."
 
     local auth_result
+    local auth_params
+    auth_params=$(jq -n \
+        --arg username "$USERNAME" \
+        --arg password "$PASSWORD" \
+        '{USERNAME: $username, PASSWORD: $password}')
     auth_result=$(AWS_PROFILE="$AWS_PROFILE" aws cognito-idp admin-initiate-auth \
         --user-pool-id "$USER_POOL_ID" \
         --client-id "$CLIENT_ID" \
         --auth-flow ADMIN_NO_SRP_AUTH \
-        --auth-parameters "USERNAME=$USERNAME,PASSWORD=$PASSWORD" \
+        --auth-parameters "$auth_params" \
         --region "$REGION" \
         2>&1)
 

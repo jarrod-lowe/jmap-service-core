@@ -34,6 +34,23 @@ The `docs/` directory contains the official JMAP RFCs for reference:
 
 We will use a Makefile for presenting all the operations to the use (such as plans, cleans, applies, etc). Terraform will be used for infrastructure. See `../ses-mail` for an example of a project using those.
 
+**First-time setup:**
+
+After deploying infrastructure, generate local test credentials:
+
+```bash
+AWS_PROFILE=ses-mail make apply ENV=test
+AWS_PROFILE=ses-mail make generate-test-user-yaml ENV=test
+```
+
+Or use the combined target:
+
+```bash
+AWS_PROFILE=ses-mail make apply-test ENV=test
+```
+
+This creates a local `test-user.yaml` file (not in git) with your test user credentials.
+
 **Getting a bearer token for JMAP clients:**
 
 ```bash
