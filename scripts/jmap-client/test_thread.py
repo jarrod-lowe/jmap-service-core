@@ -41,10 +41,14 @@ class TestThread:
 
         # Cleanup
         if request.cls.all_email_ids:
+            print(f"Destroying {len(request.cls.all_email_ids)} emails: {request.cls.all_email_ids}")
             destroy_emails_and_verify_cleanup(
                 api_url, token, account_id, request.cls.all_email_ids
             )
-        destroy_mailbox(api_url, token, account_id, mailbox_id, on_destroy_remove_emails=True)
+            print(f"Email destroy completed")
+        print(f"Destroying mailbox {mailbox_id}")
+        result = destroy_mailbox(api_url, token, account_id, mailbox_id, on_destroy_remove_emails=True)
+        print(f"Mailbox destroy result: {result}")
 
     def test_standalone_email_gets_own_thread(self):
         """Standalone email (no In-Reply-To) gets its own thread."""

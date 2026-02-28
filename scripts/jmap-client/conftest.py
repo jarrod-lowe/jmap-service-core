@@ -95,8 +95,8 @@ def delete_test_user(cognito_client, user_pool_id: str, username: str) -> None:
     )
 
 
-def verify_dynamodb_clean(dynamodb_client, table_name: str, account_id: str) -> list[str]:
-    """Verify only infrastructure records exist. Returns list of orphan sks if any.
+def verify_dynamodb_clean(dynamodb_client, table_name: str, account_id: str) -> list[dict]:
+    """Verify only infrastructure records exist. Returns list of orphan items if any.
 
     Infrastructure records that are expected to remain:
     - META# - account metadata
@@ -107,7 +107,6 @@ def verify_dynamodb_clean(dynamodb_client, table_name: str, account_id: str) -> 
         TableName=table_name,
         KeyConditionExpression="pk = :pk",
         ExpressionAttributeValues={":pk": {"S": f"ACCOUNT#{account_id}"}},
-        ProjectionExpression="sk",
     )
 
     orphans = []
@@ -116,7 +115,15 @@ def verify_dynamodb_clean(dynamodb_client, table_name: str, account_id: str) -> 
         # Allow infrastructure records: META#, STATE#*, CHANGE#*
         if sk.startswith(("META#", "STATE#", "CHANGE#")):
             continue
-        orphans.append(sk)
+
+        # Return the full item with key fields extracted
+        orphan_info = {
+            "sk": sk,
+            "has_deletedAt": "deletedAt" in item,
+        }
+        if "deletedAt" in item:
+            orphan_info["deletedAt"] = item["deletedAt"].get("S", "")
+        orphans.append(orphan_info)
 
     return orphans
 
@@ -284,13 +291,21 @@ def test_account(jmap_host, cognito_user_pool_id, cognito_client_id,
             if dynamodb_table:
                 orphans = verify_dynamodb_clean(dynamodb, dynamodb_table, account_id)
                 if orphans:
-                    errors.append(f"Orphaned records in {dynamodb_table}: {orphans}")
+                    orphan_details = "\n".join([
+                        f"  {o['sk']}: deletedAt={o.get('deletedAt', 'NOT SET')}"
+                        for o in orphans
+                    ])
+                    errors.append(f"Orphaned records in {dynamodb_table}:\n{orphan_details}")
 
             # Check email table
             if dynamodb_email_table:
                 orphans = verify_dynamodb_clean(dynamodb, dynamodb_email_table, account_id)
                 if orphans:
-                    errors.append(f"Orphaned records in {dynamodb_email_table}: {orphans}")
+                    orphan_details = "\n".join([
+                        f"  {o['sk']}: deletedAt={o.get('deletedAt', 'NOT SET')}"
+                        for o in orphans
+                    ])
+                    errors.append(f"Orphaned records in {dynamodb_email_table}:\n{orphan_details}")
 
             # Check S3
             if blob_bucket:

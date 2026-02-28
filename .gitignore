@@ -31,3 +31,4 @@ package-lock.json
 go.sum
 
 test-user.yaml
+.aider*

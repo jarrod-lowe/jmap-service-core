@@ -621,6 +621,14 @@ def destroy_mailbox(
     assert len(method_responses) > 0, "Empty methodResponses"
 
     response_name, response_data, _ = method_responses[0]
+
+    # Print diagnostic info
+    print(f"Mailbox/set response: {response_name}")
+    if "destroyed" in response_data:
+        print(f"  Destroyed: {response_data['destroyed']}")
+    if "notDestroyed" in response_data:
+        print(f"  NotDestroyed: {response_data['notDestroyed']}")
+
     return {"methodName": response_name, **response_data}
 
 
@@ -656,10 +664,10 @@ def verify_special_mailboxes(mailboxes: list[dict]) -> bool:
     return True
 
 
-def destroy_all_mailboxes(api_url: str, token: str, account_id: str, mailbox_ids: list[str]) -> None:
-    """Destroy all mailboxes, removing any emails in them."""
+def destroy_all_mailboxes(api_url: str, token: str, account_id: str, mailbox_ids: list[str]) -> dict:
+    """Destroy all mailboxes, removing any emails in them. Returns JMAP response."""
     if not mailbox_ids:
-        return
+        return {}
 
     mailbox_set_call = [
         "Mailbox/set",
@@ -670,7 +678,18 @@ def destroy_all_mailboxes(api_url: str, token: str, account_id: str, mailbox_ids
         },
         "destroyAllMailboxes",
     ]
-    make_jmap_request(api_url, token, [mailbox_set_call])
+    response = make_jmap_request(api_url, token, [mailbox_set_call])
+
+    # Print diagnostic info
+    if "methodResponses" in response:
+        resp_name, resp_data, _ = response["methodResponses"][0]
+        print(f"Mailbox/set response: {resp_name}")
+        if "destroyed" in resp_data:
+            print(f"  Destroyed: {resp_data['destroyed']}")
+        if "notDestroyed" in resp_data:
+            print(f"  NotDestroyed: {resp_data['notDestroyed']}")
+
+    return response
 
 
 def destroy_emails_and_verify_cleanup(
@@ -685,7 +704,10 @@ def destroy_emails_and_verify_cleanup(
     Raises AssertionError on failure (for use with pytest).
     """
     if not email_ids:
+        print("destroy_emails_and_verify_cleanup: No emails to destroy")
         return
+
+    print(f"destroy_emails_and_verify_cleanup: Destroying {len(email_ids)} emails")
 
     # Step 1: Get blobIds for the emails
     blob_ids = []
@@ -733,6 +755,11 @@ def destroy_emails_and_verify_cleanup(
     assert response_name == "Email/set", f"Unexpected method: {response_name}"
 
     destroyed = response_data.get("destroyed", [])
+    not_destroyed = response_data.get("notDestroyed", {})
+    print(f"  Email/set destroy response: destroyed={len(destroyed)}, notDestroyed={len(not_destroyed)}")
+    if not_destroyed:
+        print(f"    notDestroyed details: {not_destroyed}")
+
     assert set(destroyed) == set(email_ids), (
         f"Not all destroyed. Expected {email_ids}, got {destroyed}"
     )
